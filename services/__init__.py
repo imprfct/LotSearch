@@ -1,5 +1,6 @@
 """Services package initialization"""
-from .parser import Parser
+from .alerts import AdminAlertHandler
 from .monitor import Monitor
+from .parser import Parser
 
-__all__ = ['Parser', 'Monitor']
+__all__ = ["Parser", "Monitor", "AdminAlertHandler"]

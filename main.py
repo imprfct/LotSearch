@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot import router
 from config import settings
-from services import Monitor
+from services import AdminAlertHandler, Monitor
 from services.runtime import configure_scheduler
 
 # ensure logs are recorded both to stdout and to a rotating file
@@ -43,6 +43,15 @@ configure_logging()
 logger = logging.getLogger("lotsearch")
 
 
+def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    message = context.get("message", "Unhandled event loop exception")
+    exception = context.get("exception")
+    if exception is not None:
+        logger.critical(message, exc_info=exception)
+    else:
+        logger.critical(message)
+
+
 async def main() -> None:
     settings.validate()
 
@@ -52,6 +61,12 @@ async def main() -> None:
     )
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
+
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_loop_exception_handler)
+
+    alert_handler = AdminAlertHandler(bot, settings.ADMIN_CHAT_IDS, loop)
+    logging.getLogger().addHandler(alert_handler)
 
     monitor = Monitor(bot)
 
@@ -82,4 +97,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception:
-        logger.exception("Fatal error")
+        logger.critical("Fatal error", exc_info=True)
