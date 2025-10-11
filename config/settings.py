@@ -6,7 +6,9 @@ from typing import List
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+# Skip loading in test environment
+if os.getenv('PYTEST_CURRENT_TEST') is None:
+    load_dotenv()
 
 
 class Settings:
