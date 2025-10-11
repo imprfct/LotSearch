@@ -42,6 +42,10 @@ class Monitor:
         loop = asyncio.get_running_loop()
         current_items = await loop.run_in_executor(None, self.parser.get_items_from_url, url)
 
+        if self.parser.last_error is not None:
+            logger.warning("Skipping %s due to fetch error: %s", url, self.parser.last_error)
+            return
+
         if not current_items:
             logger.warning("No items found at %s", url)
             return

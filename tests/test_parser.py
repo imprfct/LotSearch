@@ -9,6 +9,7 @@ import requests
 
 from services.parser import Parser
 from models import Item
+from config import settings
 
 LIVE_TESTS_ENABLED = os.getenv("ENABLE_LIVE_TESTS") == "1"
 
@@ -64,31 +65,60 @@ class TestParser:
         mock_response.raise_for_status = Mock()
         mock_get.return_value = mock_response
         
-        parser = Parser()
+        session = Mock()
+        session.headers = {}
+        session.get = mock_get
+        parser = Parser(session=session)
         content = parser.get_page_content("https://example.com")
         
         assert content == "<html>test</html>"
-        mock_get.assert_called_once()
+        mock_get.assert_called_once_with(
+            "https://example.com",
+            headers=settings.HEADERS,
+            timeout=settings.REQUEST_TIMEOUT,
+        )
+        assert parser.last_error is None
     
     @patch('services.parser.requests.get')
     def test_get_page_content_failure(self, mock_get):
         """Test page fetch handles errors"""
         mock_get.side_effect = requests.RequestException("Network error")
         
-        parser = Parser()
+        session = Mock()
+        session.headers = {}
+        session.get = mock_get
+        parser = Parser(session=session)
         content = parser.get_page_content("https://example.com")
         
         assert content is None
+        assert isinstance(parser.last_error, requests.RequestException)
     
     @patch('services.parser.requests.get')
     def test_get_page_content_timeout(self, mock_get):
         """Test page fetch handles timeout"""
         mock_get.side_effect = requests.Timeout("Request timeout")
         
-        parser = Parser()
+        session = Mock()
+        session.headers = {}
+        session.get = mock_get
+        parser = Parser(session=session)
         content = parser.get_page_content("https://example.com")
         
         assert content is None
+        assert isinstance(parser.last_error, requests.Timeout)
+
+    @patch('services.parser.requests.get')
+    def test_get_page_content_connection_error_logs(self, mock_get):
+        """Parser should store connection errors"""
+        mock_get.side_effect = requests.ConnectionError("DNS failure")
+
+        session = Mock()
+        session.headers = {}
+        session.get = mock_get
+        parser = Parser(session=session)
+
+        assert parser.get_page_content("https://example.com") is None
+        assert isinstance(parser.last_error, requests.ConnectionError)
     
     @patch.object(Parser, 'get_page_content')
     @patch.object(Parser, 'parse_items')

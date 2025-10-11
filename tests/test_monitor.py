@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+import requests
 
 from config import settings
 from models import Item
@@ -62,3 +63,21 @@ async def test_monitor_detects_new_items(temp_db):
 
     stored_urls = monitor.repository.get_known_urls(source_url=settings.MONITOR_URLS[0])
     assert stored_urls == {item.url for item in updated_items}
+
+
+@pytest.mark.asyncio
+async def test_monitor_skips_url_on_fetch_error(temp_db):
+    bot = AsyncMock()
+    monitor = Monitor(bot)
+
+    def failing_fetch(url: str):
+        monitor.parser.last_error = requests.ConnectionError("DNS failure")
+        return []
+
+    monitor.parser.get_items_from_url = failing_fetch
+    monitor._send_notification = AsyncMock()
+
+    await monitor._check_url(settings.MONITOR_URLS[0])
+
+    monitor._send_notification.assert_not_awaited()
+    assert monitor.repository.get_known_urls(source_url=settings.MONITOR_URLS[0]) == set()

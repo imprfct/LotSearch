@@ -6,8 +6,11 @@ import re
 from typing import List, Optional
 
 import requests
+from requests import Session
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+from urllib3.util.retry import Retry
 
 from config import settings
 from models import Item
@@ -23,17 +26,42 @@ PRICE_PATTERN = re.compile(
 class Parser:
     """Web page parser for extracting product information."""
 
-    def __init__(self) -> None:
+    def __init__(self, session: Optional[Session] = None) -> None:
         self.headers = settings.HEADERS
+        self.timeout = settings.REQUEST_TIMEOUT
+        self.session = session or self._create_session()
+        if session is not None:
+            headers = getattr(self.session, "headers", None)
+            if headers is not None and hasattr(headers, "update"):
+                headers.update(self.headers)
+        self.last_error: Optional[Exception] = None
 
     def get_page_content(self, url: str) -> Optional[str]:
         """Fetch HTML content from an URL."""
+        self.last_error = None
         try:
-            response = requests.get(url, headers=self.headers, timeout=10)
+            response = self.session.get(url, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
             return response.text
+        except requests.Timeout as exc:
+            self.last_error = exc
+            logger.warning("Timeout fetching page %s: %s", url, exc)
+            return None
+        except requests.ConnectionError as exc:
+            self.last_error = exc
+            logger.warning("Connection error fetching page %s: %s", url, exc)
+            logger.debug("Connection error details", exc_info=True)
+            return None
+        except requests.HTTPError as exc:
+            self.last_error = exc
+            status_code = getattr(exc.response, "status_code", "unknown")
+            logger.error("HTTP error fetching page %s (status %s)", url, status_code)
+            logger.debug("HTTP error details", exc_info=True)
+            return None
         except requests.RequestException as e:
-            logger.exception("Error fetching page %s", url)
+            self.last_error = e
+            logger.error("Error fetching page %s: %s", url, e)
+            logger.debug("Unhandled request exception", exc_info=True)
             return None
 
     def parse_items(self, html: str) -> List[Item]:
@@ -90,3 +118,22 @@ class Parser:
         if not match:
             return "Цена не указана"
         return " ".join(match.group(0).split())
+
+    def _create_session(self) -> Session:
+        session = requests.Session()
+        retries = settings.REQUEST_MAX_RETRIES
+        if retries > 0:
+            retry = Retry(
+                total=retries,
+                connect=retries,
+                read=retries,
+                backoff_factor=settings.REQUEST_BACKOFF_FACTOR,
+                status_forcelist=(429, 500, 502, 503, 504),
+                allowed_methods=frozenset({"GET"}),
+                raise_on_status=False,
+            )
+            adapter = HTTPAdapter(max_retries=retry)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+        session.headers.update(self.headers)
+        return session

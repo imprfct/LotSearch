@@ -26,6 +26,9 @@ class Settings:
     MONITOR_URLS: Tuple[str, ...] = field(init=False)
     HEADERS: dict[str, str] = field(init=False)
     DB_PATH: Path = field(init=False)
+    REQUEST_TIMEOUT: float = field(init=False)
+    REQUEST_MAX_RETRIES: int = field(init=False)
+    REQUEST_BACKOFF_FACTOR: float = field(init=False)
 
     def __post_init__(self) -> None:
         self.reload()
@@ -69,6 +72,30 @@ class Settings:
         if not db_path.is_absolute():
             db_path = Path.cwd() / db_path
         self.DB_PATH = db_path
+
+        try:
+            timeout = float(os.getenv("REQUEST_TIMEOUT", "10"))
+        except ValueError as exc:
+            raise ValueError("REQUEST_TIMEOUT must be a number") from exc
+        if timeout <= 0:
+            raise ValueError("REQUEST_TIMEOUT must be positive")
+        self.REQUEST_TIMEOUT = timeout
+
+        try:
+            retries = int(os.getenv("REQUEST_MAX_RETRIES", "3"))
+        except ValueError as exc:
+            raise ValueError("REQUEST_MAX_RETRIES must be an integer") from exc
+        if retries < 0:
+            raise ValueError("REQUEST_MAX_RETRIES must be zero or positive")
+        self.REQUEST_MAX_RETRIES = retries
+
+        try:
+            backoff = float(os.getenv("REQUEST_BACKOFF_FACTOR", "0.5"))
+        except ValueError as exc:
+            raise ValueError("REQUEST_BACKOFF_FACTOR must be a number") from exc
+        if backoff < 0:
+            raise ValueError("REQUEST_BACKOFF_FACTOR cannot be negative")
+        self.REQUEST_BACKOFF_FACTOR = backoff
 
     def validate(self) -> None:
         if not self.BOT_TOKEN:
