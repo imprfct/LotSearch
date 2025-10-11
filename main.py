@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import os
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -11,10 +14,32 @@ from config import settings
 from services import Monitor
 from services.runtime import configure_scheduler
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-)
+# ensure logs are recorded both to stdout and to a rotating file
+def configure_logging() -> None:
+    log_dir = Path(os.getenv("LOG_DIR", "logs"))
+    if not log_dir.is_absolute():
+        log_dir = Path.cwd() / log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = log_dir / "bot.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            RotatingFileHandler(
+                log_file,
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            ),
+        ],
+        force=True,
+    )
+
+
+configure_logging()
 logger = logging.getLogger("lotsearch")
 
 
