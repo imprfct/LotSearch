@@ -28,14 +28,14 @@ class Monitor:
         """Check all monitored URLs for new items and send notifications."""
         logger.info("Starting monitoring check…")
 
-        urls = self.tracked_pages.get_enabled_urls()
-        for url in urls:
+        pages = self.tracked_pages.get_enabled_pages()
+        for page in pages:
             try:
-                await self._check_url(url)
+                await self._check_url(page.url, page.label)
             except Exception:
-                logger.exception("Error checking URL %s", url)
+                logger.exception("Error checking URL %s", page.url)
     
-    async def _check_url(self, url: str) -> None:
+    async def _check_url(self, url: str, tracking_label: str | None = None) -> None:
         """Check a specific URL for new items."""
         logger.info("Checking URL: %s", url)
 
@@ -64,7 +64,7 @@ class Monitor:
         new_items = [item for item in current_items if item.url not in known_urls]
 
         for item in new_items:
-            await self._send_notification(item)
+            await self._send_notification(item, tracking_label)
 
         notified = len(new_items)
 
@@ -72,17 +72,20 @@ class Monitor:
         logger.info("Found %s new items at %s", len(new_items), url)
         logger.info("Sent %s notifications for %s", notified, url)
     
-    async def _send_notification(self, item: Item) -> None:
+    async def _send_notification(self, item: Item, tracking_label: str | None = None) -> None:
         """Send notification about new item to all admins."""
         title = escape(item.title)
         price = escape(str(item.price))
         url = escape(item.url, quote=True)
+        lines = [f"🆕 <b>{title}</b>"]
 
-        caption = (
-            f"🆕 <b>{title}</b>\n"
-            f"Цена: {price}\n"
-            f"🔗 <a href=\"{url}\">{url}</a>"
-        )
+        if tracking_label:
+            tracking = escape(tracking_label)
+            lines.append(f"Tracking: <b>{tracking}</b>")
+
+        lines.append(f"Цена: {price}")
+        lines.append(f"🔗 <a href=\"{url}\">{url}</a>")
+        caption = "\n".join(lines)
 
         for chat_id in settings.ADMIN_CHAT_IDS:
             try:

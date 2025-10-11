@@ -81,3 +81,26 @@ async def test_monitor_skips_url_on_fetch_error(temp_db):
 
     monitor._send_notification.assert_not_awaited()
     assert monitor.repository.get_known_urls(source_url=settings.MONITOR_URLS[0]) == set()
+
+
+@pytest.mark.asyncio
+async def test_monitor_send_notification_includes_tracking_label(temp_db):
+    bot = AsyncMock()
+    monitor = Monitor(bot)
+
+    item = Item(
+        url="https://example.com/lot10",
+        title="Lot 10",
+        price="1000",
+        img_url="https://example.com/img10",
+    )
+    tracking_label = "Coins Tracking"
+
+    await monitor._send_notification(item, tracking_label)
+
+    assert bot.send_photo.await_count == len(settings.ADMIN_CHAT_IDS)
+    assert bot.send_message.await_count == 0
+
+    for call in bot.send_photo.await_args_list:
+        kwargs = call.kwargs
+        assert "Tracking: <b>Coins Tracking</b>" in kwargs["caption"]

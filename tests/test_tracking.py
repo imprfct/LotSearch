@@ -50,6 +50,16 @@ def test_tracked_page_repository_disable_all_then_empty_enabled_list(temp_db):
     assert repository.get_enabled_urls() == []
 
 
+def test_tracked_page_repository_get_enabled_pages(temp_db):
+    repository = TrackedPageRepository()
+
+    enabled_pages = repository.get_enabled_pages()
+
+    assert [page.url for page in enabled_pages] == list(settings.MONITOR_URLS)
+    assert [page.label for page in enabled_pages]
+    assert all(page.enabled for page in enabled_pages)
+
+
 def test_tracked_page_repository_no_reseed_after_clear(temp_db):
     repository = TrackedPageRepository()
 

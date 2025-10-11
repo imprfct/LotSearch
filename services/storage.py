@@ -275,6 +275,17 @@ class TrackedPageRepository:
 
         return [row[0] for row in rows]
 
+    def get_enabled_pages(self) -> list[TrackedPage]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, label, url, enabled FROM tracked_pages WHERE enabled = 1 ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+
+        return [
+            TrackedPage(id=row[0], label=row[1], url=row[2], enabled=bool(row[3]))
+            for row in rows
+        ]
+
     def add_page(self, url: str, label: str | None = None) -> TrackedPage:
         normalized_url = url.strip()
         if not normalized_url or not normalized_url.startswith(("http://", "https://")):
