@@ -9,6 +9,7 @@ from aiogram import Bot
 from config import settings
 from models import Item
 from services.parser import Parser
+from services.storage import ItemRepository
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class Monitor:
     def __init__(self, bot: Bot):
         self.bot = bot
         self.parser = Parser()
-        self.known_items: set[str] = set()
+        self.repository = ItemRepository()
     
     async def check_new_items(self) -> None:
         """Check all monitored URLs for new items and send notifications."""
@@ -42,13 +43,20 @@ class Monitor:
             logger.warning("No items found at %s", url)
             return
 
-        new_items = [item for item in current_items if item.url not in self.known_items]
+        known_urls = self.repository.get_known_urls(source_url=url)
+        new_items = [item for item in current_items if item.url not in known_urls]
 
-        for item in new_items:
-            await self._send_notification(item)
+        if not known_urls and current_items:
+            await self._send_notification(current_items[0])
+            notified = 1
+        else:
+            for item in new_items:
+                await self._send_notification(item)
+            notified = len(new_items)
 
-        self.known_items.update(item.url for item in current_items)
+        self.repository.save_items(current_items, source_url=url)
         logger.info("Found %s new items at %s", len(new_items), url)
+        logger.info("Sent %s notifications for %s", notified, url)
     
     async def _send_notification(self, item: Item) -> None:
         """Send notification about new item to all admins."""

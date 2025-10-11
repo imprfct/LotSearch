@@ -17,6 +17,16 @@ def mock_env_vars(monkeypatch) -> None:
 
 
 @pytest.fixture
+def temp_db(monkeypatch, tmp_path):
+    path = tmp_path / 'items.db'
+    monkeypatch.setenv('DB_PATH', str(path))
+    settings.reload()
+    yield path
+    monkeypatch.delenv('DB_PATH', raising=False)
+    settings.reload()
+
+
+@pytest.fixture
 def sample_html() -> str:
     """Sample HTML with product cards for testing parser"""
     return """

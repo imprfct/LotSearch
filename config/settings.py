@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Tuple
 
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ class Settings:
     CHECK_INTERVAL_MINUTES: int = field(init=False)
     MONITOR_URLS: Tuple[str, ...] = field(init=False)
     HEADERS: dict[str, str] = field(init=False)
+    DB_PATH: Path = field(init=False)
 
     def __post_init__(self) -> None:
         self.reload()
@@ -61,6 +63,12 @@ class Settings:
                 "Chrome/91.0.4472.124 Safari/537.36"
             )
         }
+
+        db_path_value = os.getenv("DB_PATH", "data/items.db").strip()
+        db_path = Path(db_path_value)
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        self.DB_PATH = db_path
 
     def validate(self) -> None:
         if not self.BOT_TOKEN:
