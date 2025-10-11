@@ -38,7 +38,7 @@ async def test_admin_alert_handler_sends_messages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_alert_handler_ignores_non_critical() -> None:
+async def test_admin_alert_handler_sends_on_error() -> None:
     bot = DummyBot()
     handler = AdminAlertHandler(cast(Bot, bot), (1,), loop=asyncio.get_running_loop())
 
@@ -48,8 +48,10 @@ async def test_admin_alert_handler_ignores_non_critical() -> None:
     logger.propagate = False
 
     logger.error("Not critical")
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
 
-    assert bot.sent == []
+    assert len(bot.sent) == 1
+    assert bot.sent[0][0] == 1
+    assert "Not critical" in bot.sent[0][1]
 
     logger.removeHandler(handler)

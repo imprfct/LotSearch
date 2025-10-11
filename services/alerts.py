@@ -15,7 +15,7 @@ MAX_ALERT_LENGTH = 3500
 
 
 class AdminAlertHandler(logging.Handler):
-    """Logging handler that forwards critical messages to Telegram admins."""
+    """Logging handler that forwards error messages to Telegram admins."""
 
     def __init__(
         self,
@@ -23,7 +23,7 @@ class AdminAlertHandler(logging.Handler):
         admin_chat_ids: Sequence[int],
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
-        super().__init__(level=logging.CRITICAL)
+        super().__init__(level=logging.ERROR)
         self._bot = bot
         self._admin_chat_ids = tuple(admin_chat_ids)
         self._loop = loop
@@ -54,7 +54,7 @@ class AdminAlertHandler(logging.Handler):
 
         details = details[-MAX_ALERT_LENGTH:]
         header = (
-            "⚠️ Критическая ошибка\n"
+            f"⚠️ Ошибка уровня {record.levelname}\n"
             f"Время: {timestamp}\n"
             f"Логгер: {record.name}\n"
             f"Источник: {location}\n\n"
@@ -62,7 +62,7 @@ class AdminAlertHandler(logging.Handler):
         return f"{header}{details}"
 
     def emit(self, record: logging.LogRecord) -> None:
-        if not self._admin_chat_ids or record.levelno < logging.CRITICAL:
+        if not self._admin_chat_ids or record.levelno < logging.ERROR:
             return
 
         message = self._build_message(record)
