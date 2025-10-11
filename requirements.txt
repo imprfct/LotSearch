@@ -1,0 +1,16 @@
+# LotSearch Bot Requirements
+# Core framework
+aiogram==3.13.1
+
+# HTTP requests and parsing
+requests==2.31.0
+beautifulsoup4==4.12.3
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Task scheduling
+apscheduler==3.10.4
+
+# Additional dependencies
+lxml>=5.1.0
