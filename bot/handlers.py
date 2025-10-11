@@ -122,14 +122,27 @@ async def cmd_test(message: Message) -> None:
     user_id = _extract_user_id(message)
     logger.info("Admin %s requested test", user_id)
 
+    bot = message.bot
+
+    if not user_id or bot is None:
+        await message.answer(
+            "❌ <b>Ошибка!</b>\n\n"
+            "Не удалось определить пользователя.",
+            parse_mode='HTML'
+        )
+        return
+
     command_parts = (message.text or "").split(maxsplit=1)
 
     if len(command_parts) < 2:
-        await message.answer(
-            "❌ <b>Ошибка!</b>\n\n"
-            "Использование: <code>/test URL</code>\n\n"
-            "Пример:\n"
-            "<code>/test https://coins.ay.by/sssr/yubilejnye/iz-dragocennyh-metallov/</code>",
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                "❌ <b>Ошибка!</b>\n\n"
+                "Использование: <code>/test URL</code>\n\n"
+                "Пример:\n"
+                "<code>/test https://coins.ay.by/sssr/yubilejnye/iz-dragocennyh-metallov/</code>"
+            ),
             parse_mode='HTML'
         )
         return
@@ -137,16 +150,22 @@ async def cmd_test(message: Message) -> None:
     url = command_parts[1].strip()
 
     if not url.startswith('http'):
-        await message.answer(
-            "❌ <b>Ошибка!</b>\n\n"
-            "URL должен начинаться с http:// или https://",
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                "❌ <b>Ошибка!</b>\n\n"
+                "URL должен начинаться с http:// или https://"
+            ),
             parse_mode='HTML'
         )
         return
 
-    status_msg = await message.answer(
-        "⏳ <b>Проверяю URL...</b>\n"
-        f"URL: <code>{url}</code>",
+    status_msg = await bot.send_message(
+        chat_id=user_id,
+        text=(
+            "⏳ <b>Проверяю URL...</b>\n"
+            f"URL: <code>{url}</code>"
+        ),
         parse_mode='HTML'
     )
 
@@ -180,21 +199,26 @@ async def cmd_test(message: Message) -> None:
                     f"🔗 {item.url}"
                 )
                 
-                await message.answer_photo(
+                await bot.send_photo(
+                    chat_id=user_id,
                     photo=item.img_url,
                     caption=caption,
                     parse_mode='HTML'
                 )
             except Exception as e:
                 logger.exception("Error sending item %s", i)
-                await message.answer(
-                    f"❌ Ошибка отправки товара {i}: {item.title}",
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=f"❌ Ошибка отправки товара {i}: {item.title}",
                     parse_mode='HTML'
                 )
 
-        await message.answer(
-            f"✅ <b>Тест завершён!</b>\n\n"
-            f"Отправлено: {len(items)} товар(ов)",
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"✅ <b>Тест завершён!</b>\n\n"
+                f"Отправлено: {len(items)} товар(ов)"
+            ),
             parse_mode='HTML'
         )
     except Exception as e:
@@ -205,6 +229,12 @@ async def cmd_test(message: Message) -> None:
             f"<code>{url}</code>\n\n"
             f"Ошибка: {str(e)}",
             parse_mode='HTML'
+        )
+
+    if message.chat.id != user_id:
+        await message.reply(
+            "📬 Результаты отправлены вам в личные сообщения.",
+            quote=True
         )
 
 
