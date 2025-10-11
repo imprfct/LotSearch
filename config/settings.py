@@ -14,7 +14,11 @@ class Settings:
     
     # Bot configuration
     BOT_TOKEN: str = os.getenv('BOT_TOKEN', '')
-    ADMIN_CHAT_ID: int = int(os.getenv('ADMIN_CHAT_ID', '0'))
+    ADMIN_CHAT_IDS: List[int] = [
+        int(chat_id.strip()) 
+        for chat_id in os.getenv('ADMIN_CHAT_IDS', '').split(',') 
+        if chat_id.strip()
+    ]
     
     # Monitoring configuration
     CHECK_INTERVAL_MINUTES: int = int(os.getenv('CHECK_INTERVAL_MINUTES', '60'))
@@ -34,8 +38,8 @@ class Settings:
         """Validate required settings"""
         if not self.BOT_TOKEN:
             raise ValueError("BOT_TOKEN is required in .env file")
-        if not self.ADMIN_CHAT_ID:
-            raise ValueError("ADMIN_CHAT_ID is required in .env file")
+        if not self.ADMIN_CHAT_IDS:
+            raise ValueError("ADMIN_CHAT_IDS is required in .env file")
 
 
 # Create global settings instance

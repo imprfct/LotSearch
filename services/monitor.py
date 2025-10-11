@@ -63,24 +63,26 @@ class Monitor:
     
     async def _send_notification(self, item: Item) -> None:
         """
-        Send notification about new item
+        Send notification about new item to all admins
         
         Args:
             item: Item to notify about
         """
-        try:
-            caption = (
-                f"🆕 <b>{item.title}</b>\n"
-                f"Цена: {item.price}\n"
-                f"🔗 {item.url}"
-            )
-            
-            await self.bot.send_photo(
-                chat_id=settings.ADMIN_CHAT_ID,
-                photo=item.img_url,
-                caption=caption,
-                parse_mode='HTML'
-            )
-            logger.info(f"Notification sent for: {item.title}")
-        except Exception as e:
-            logger.error(f"Error sending notification for {item.title}: {e}")
+        caption = (
+            f"🆕 <b>{item.title}</b>\n"
+            f"Цена: {item.price}\n"
+            f"🔗 {item.url}"
+        )
+        
+        # Send notification to all admin chat IDs
+        for chat_id in settings.ADMIN_CHAT_IDS:
+            try:
+                await self.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=item.img_url,
+                    caption=caption,
+                    parse_mode='HTML'
+                )
+                logger.info(f"Notification sent to {chat_id} for: {item.title}")
+            except Exception as e:
+                logger.error(f"Error sending notification to {chat_id} for {item.title}: {e}")
