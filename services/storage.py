@@ -49,6 +49,45 @@ class ItemRepository:
             rows = connection.execute(query, parameters).fetchall()
         return {row[0] for row in rows}
 
+    def get_recent_items(
+        self, source_url: str, limit: int | None = None
+    ) -> list[tuple[Item, datetime | None]]:
+        if limit is not None and limit <= 0:
+            return []
+
+        query = (
+            """
+            SELECT id, url, title, price, img_url, created_at
+            FROM items
+            WHERE source_url = ?
+            ORDER BY datetime(created_at) DESC, id DESC
+            """
+        )
+        parameters: list[object] = [source_url]
+
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+
+        recent: list[tuple[Item, datetime | None]] = []
+        for row in rows:
+            created_at = row[5]
+            saved_at: datetime | None
+            try:
+                saved_at = datetime.fromisoformat(created_at) if created_at else None
+            except ValueError:
+                saved_at = None
+            recent.append(
+                (
+                    Item(url=row[1], title=row[2], price=row[3], img_url=row[4]),
+                    saved_at,
+                )
+            )
+        return recent
+
     def save_items(self, items: Iterable[Item], source_url: str) -> None:
         timestamp = datetime.now(UTC).isoformat()
         records = [

@@ -5,23 +5,26 @@ import asyncio
 import html
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Dict, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart, Command
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.filters import IsAdmin
 from config import settings
-from models import TrackedPage
+from models import Item, TrackedPage
 from services.parser import Parser
-from services.storage import TrackedPageRepository
+from services.storage import ItemRepository, TrackedPageRepository
 
 logger = logging.getLogger(__name__)
 router = Router()
 parser = Parser()
+item_repository = ItemRepository()
 
 
 @dataclass(slots=True)
@@ -35,6 +38,13 @@ class PendingAction:
 _pending_actions: Dict[int, PendingAction] = {}
 _user_filters: Dict[int, str] = {}
 _menu_message_refs: Dict[int, Tuple[int, int]] = {}
+
+
+@dataclass(slots=True)
+class LatestPreview:
+    caption: str
+    keyboard: InlineKeyboardMarkup
+    photo_url: str | None
 
 FILTER_OPTIONS = (
     ("all", "Все"),
@@ -145,12 +155,17 @@ async def _refresh_menu_message(
     pages = repository.list_pages()
     filter_mode = _get_filter(user_id)
     overview_text, keyboard = _compose_tracking_overview(pages, filter_mode, notice=notice)
-    await message.edit_text(
-        overview_text,
-        parse_mode='HTML',
-        reply_markup=keyboard,
-    )
-    _register_menu_message(user_id, message)
+    try:
+        await message.edit_text(
+            overview_text,
+            parse_mode='HTML',
+            reply_markup=keyboard,
+        )
+        _register_menu_message(user_id, message)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        raise
 
 
 async def _render_menu_for_user(
@@ -253,6 +268,10 @@ def _build_tracking_keyboard(
                 text=f"⚙️ Сортировка: {_order_label(current_order)}",
                 callback_data=f"tracking:sort:{page.id}"
             ),
+            InlineKeyboardButton(
+                text="📰 Лоты",
+                callback_data=f"tracking:latest:{page.id}"
+            ),
         )
 
     builder.row(
@@ -261,6 +280,115 @@ def _build_tracking_keyboard(
     )
 
     return builder.as_markup()
+
+
+def _build_latest_keyboard(page_id: int, index: int, total: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+
+    def nav_button(label: str, target: int, enabled: bool) -> InlineKeyboardButton:
+        callback_data = f"tracking:latestnav:{page_id}:{target}" if enabled else "tracking:noop"
+        return InlineKeyboardButton(text=label, callback_data=callback_data)
+
+    builder.row(
+        nav_button("⏮", 0, index > 0),
+        nav_button("◀️", max(index - 1, 0), index > 0),
+        nav_button("▶️", min(index + 1, total - 1), index < total - 1),
+        nav_button("⏭", max(total - 1, 0), index < total - 1),
+    )
+
+    builder.row(
+        InlineKeyboardButton(text="✖️ Закрыть", callback_data="tracking:latestclose"),
+    )
+
+    return builder.as_markup()
+
+
+async def _send_latest_preview_message(bot, chat_id: int, preview: LatestPreview):
+    if preview.photo_url:
+        return await bot.send_photo(
+            chat_id=chat_id,
+            photo=preview.photo_url,
+            caption=preview.caption,
+            parse_mode='HTML',
+            reply_markup=preview.keyboard,
+        )
+    return await bot.send_message(
+        chat_id=chat_id,
+        text=preview.caption,
+        parse_mode='HTML',
+        reply_markup=preview.keyboard,
+        disable_web_page_preview=True,
+    )
+
+
+async def _update_latest_preview_message(bot, message: Message, preview: LatestPreview):
+    has_photo = bool(message.photo)
+
+    try:
+        if has_photo and preview.photo_url:
+            await message.edit_media(
+                InputMediaPhoto(
+                    media=preview.photo_url,
+                    caption=preview.caption,
+                    parse_mode='HTML',
+                ),
+                reply_markup=preview.keyboard,
+            )
+            return message
+        if not has_photo and not preview.photo_url:
+            await message.edit_text(
+                preview.caption,
+                parse_mode='HTML',
+                reply_markup=preview.keyboard,
+                disable_web_page_preview=True,
+            )
+            return message
+    except Exception as exc:
+        logger.debug("Failed to edit latest preview message directly: %s", exc)
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    return await _send_latest_preview_message(bot, message.chat.id, preview)
+
+
+def _compose_latest_preview(
+    page: TrackedPage,
+    items: Sequence[tuple[Item, datetime | None]],
+    index: int,
+) -> LatestPreview:
+    total = len(items)
+    if total == 0:
+        raise ValueError("Нет доступных лотов")
+
+    if page.id is None:
+        raise ValueError("Страница должна иметь идентификатор")
+
+    index = max(0, min(index, total - 1))
+    item, saved_at = items[index]
+
+    parts: list[str] = [
+        f"📰 <b>{html.escape(page.label)}</b>",
+        f"<i>Лот {index + 1} из {total}</i>",
+        "",
+        f"<b>{html.escape(item.title)}</b>",
+    ]
+
+    if item.price:
+        parts.append(f"💰 {html.escape(item.price)}")
+
+    if saved_at is not None:
+        saved_display = saved_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        parts.append(f"🗓 {saved_display}")
+
+    parts.append(f"🔗 <a href=\"{html.escape(item.url)}\">Открыть лот</a>")
+
+    text = "\n".join(parts)
+    keyboard = _build_latest_keyboard(page.id, index, total)
+    photo_url = item.img_url or None
+    return LatestPreview(caption=text, keyboard=keyboard, photo_url=photo_url)
 
 
 def _compose_tracking_overview(
@@ -654,6 +782,53 @@ async def tracking_callback(call: CallbackQuery) -> None:
                 ),
             )
             await call.answer("Введите название")
+            return
+        elif action == "latest":
+            page_id = _parse_id(payload)
+            page = repository.get_page(page_id)
+            items = item_repository.get_recent_items(page.url)
+            if not items:
+                await call.answer("Для этой страницы пока нет сохранённых лотов.", show_alert=True)
+                return
+            await _cancel_pending_action(bot, user_id)
+            preview = _compose_latest_preview(page, items, index=0)
+            await _send_latest_preview_message(bot, message.chat.id, preview)
+            await call.answer()
+            return
+        elif action == "latestnav":
+            if len(data_parts) < 4:
+                await call.answer("Некорректное действие", show_alert=True)
+                return
+            page_id = _parse_id(data_parts[2])
+            try:
+                target_index = int(data_parts[3])
+            except ValueError:
+                await call.answer("Некорректный индекс", show_alert=True)
+                return
+            page = repository.get_page(page_id)
+            items = item_repository.get_recent_items(page.url)
+            if not items:
+                await call.answer("Для этой страницы пока нет сохранённых лотов.", show_alert=True)
+                if message:
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+                return
+            preview = _compose_latest_preview(page, items, index=target_index)
+            await _update_latest_preview_message(bot, message, preview)
+            await call.answer()
+            return
+        elif action == "latestclose":
+            if message:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+            await call.answer()
+            return
+        elif action == "noop":
+            await call.answer()
             return
         else:
             await call.answer("Неизвестное действие", show_alert=True)

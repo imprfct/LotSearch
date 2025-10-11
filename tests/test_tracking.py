@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from config import settings
-from services.storage import TrackedPageRepository
+from models import Item
+from services.storage import ItemRepository, TrackedPageRepository
 
 
 def test_tracked_page_repository_seed(temp_db):
@@ -78,3 +79,46 @@ def test_tracked_page_repository_update_sort(temp_db):
 
     with pytest.raises(ValueError):
         repository.update_sort(page.id, "unknown-sort")
+
+
+def test_item_repository_get_recent_items(temp_db):
+    item_repository = ItemRepository()
+    source_url = "https://example.com/list"
+
+    initial_batch = [
+        Item(
+            url=f"https://example.com/lot{i}",
+            title=f"Lot {i}",
+            price=f"{i * 10}",
+            img_url=f"https://example.com/img{i}",
+        )
+        for i in range(1, 6)
+    ]
+
+    item_repository.save_items(initial_batch, source_url)
+
+    new_batch = [
+        Item(
+            url=f"https://example.com/lot{i}",
+            title=f"Lot {i}",
+            price=f"{i * 10}",
+            img_url=f"https://example.com/img{i}",
+        )
+        for i in range(6, 18)
+    ]
+
+    item_repository.save_items(new_batch, source_url)
+
+    recent_all = item_repository.get_recent_items(source_url)
+
+    assert len(recent_all) == len(initial_batch) + len(new_batch)
+    first_item, saved_at = recent_all[0]
+    assert first_item.url == new_batch[-1].url
+    assert saved_at is not None
+
+    limited = item_repository.get_recent_items(source_url, limit=5)
+    assert len(limited) == 5
+    assert limited[0][0].url == new_batch[-1].url
+
+    empty_limited = item_repository.get_recent_items(source_url, limit=0)
+    assert empty_limited == []
