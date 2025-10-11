@@ -9,7 +9,7 @@ from aiogram import Bot
 from config import settings
 from models import Item
 from services.parser import Parser
-from services.storage import ItemRepository
+from services.storage import ItemRepository, TrackedPageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +21,14 @@ class Monitor:
         self.bot = bot
         self.parser = Parser()
         self.repository = ItemRepository()
+        self.tracked_pages = TrackedPageRepository()
     
     async def check_new_items(self) -> None:
         """Check all monitored URLs for new items and send notifications."""
         logger.info("Starting monitoring check…")
 
-        for url in settings.MONITOR_URLS:
+        urls = self.tracked_pages.get_enabled_urls()
+        for url in urls:
             try:
                 await self._check_url(url)
             except Exception:
@@ -44,15 +46,22 @@ class Monitor:
             return
 
         known_urls = self.repository.get_known_urls(source_url=url)
+
+        if not known_urls:
+            self.repository.save_items(current_items, source_url=url)
+            logger.info(
+                "Seeded %s existing items for %s; notifications skipped on first run",
+                len(current_items),
+                url,
+            )
+            return
+
         new_items = [item for item in current_items if item.url not in known_urls]
 
-        if not known_urls and current_items:
-            await self._send_notification(current_items[0])
-            notified = 1
-        else:
-            for item in new_items:
-                await self._send_notification(item)
-            notified = len(new_items)
+        for item in new_items:
+            await self._send_notification(item)
+
+        notified = len(new_items)
 
         self.repository.save_items(current_items, source_url=url)
         logger.info("Found %s new items at %s", len(new_items), url)

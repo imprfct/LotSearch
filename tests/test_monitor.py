@@ -10,7 +10,7 @@ from services.monitor import Monitor
 
 
 @pytest.mark.asyncio
-async def test_monitor_first_run_sends_single_notification(temp_db):
+async def test_monitor_first_run_seeds_without_notifications(temp_db):
     bot = AsyncMock()
     monitor = Monitor(bot)
 
@@ -25,9 +25,7 @@ async def test_monitor_first_run_sends_single_notification(temp_db):
 
     await monitor._check_url(settings.MONITOR_URLS[0])
 
-    assert monitor._send_notification.await_count == 1
-    sent_item = monitor._send_notification.await_args_list[0].args[0]
-    assert sent_item.url == items[0].url
+    monitor._send_notification.assert_not_awaited()
 
     stored_urls = monitor.repository.get_known_urls(source_url=settings.MONITOR_URLS[0])
     assert stored_urls == {item.url for item in items}

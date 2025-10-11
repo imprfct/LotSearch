@@ -3,10 +3,12 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import unquote
 
 from config import settings
-from models import Item
+from models import Item, TrackedPage
 
 
 class ItemRepository:
@@ -81,3 +83,265 @@ class ItemRepository:
         with self._connect() as connection:
             connection.execute("DELETE FROM items")
             connection.commit()
+
+
+ORDER_LABEL_HINTS = {
+    "create": "Новые",
+    "stop": "Скоро завершатся",
+    "cost_asc": "Дешёвые",
+    "cost_desc": "Дорогие",
+    "rating": "Высокий рейтинг",
+}
+
+
+def _build_label(url: str, existing_labels: set[str]) -> str:
+    parsed = urlparse(url)
+    path_segment = unquote(parsed.path.rstrip("/").split("/")[-1])
+    if not path_segment:
+        path_segment = parsed.netloc
+
+    path_segment = path_segment.replace("-", " ").replace("_", " ").strip().title() or "Страница"
+    order = parse_qs(parsed.query).get("order", [""])[0]
+
+    if order:
+        order_label = ORDER_LABEL_HINTS.get(order, order.replace("_", " ").replace("-", " ").strip().title() or order)
+        base_label = f"{path_segment} · {order_label}"
+    else:
+        base_label = path_segment
+
+    candidate = base_label
+    suffix = 2
+    while candidate in existing_labels:
+        candidate = f"{base_label} ({suffix})"
+        suffix += 1
+    return candidate
+
+
+def _apply_order_to_url(url: str, order: str | None) -> str:
+    parsed = urlparse(url)
+    query_pairs = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "order"
+    ]
+
+    if order:
+        query_pairs.append(("order", order))
+
+    new_query = urlencode(query_pairs, doseq=True)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+class TrackedPageRepository:
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path or settings.DB_PATH
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
+        self._ensure_seed(settings.MONITOR_URLS)
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
+
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tracked_pages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tracked_pages_enabled ON tracked_pages(enabled)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+
+    def _ensure_seed(self, defaults: Sequence[str]) -> None:
+        normalized_defaults = [url.strip() for url in defaults or () if url.strip()]
+
+        with self._connect() as connection:
+            seeded_row = connection.execute(
+                "SELECT value FROM app_meta WHERE key = ?",
+                ("tracked_pages_seeded",),
+            ).fetchone()
+
+            if seeded_row:
+                return
+
+            existing_count = connection.execute(
+                "SELECT COUNT(1) FROM tracked_pages"
+            ).fetchone()[0]
+
+            if normalized_defaults and existing_count == 0:
+                existing_labels: set[str] = set()
+                inserts = []
+                for url in normalized_defaults:
+                    label = _build_label(url, existing_labels)
+                    existing_labels.add(label)
+                    timestamp = datetime.now(UTC).isoformat()
+                    inserts.append((label, url, 1, timestamp))
+
+                if inserts:
+                    connection.executemany(
+                        """
+                        INSERT INTO tracked_pages (label, url, enabled, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        inserts,
+                    )
+
+            connection.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                ("tracked_pages_seeded", datetime.now(UTC).isoformat()),
+            )
+            connection.commit()
+
+    def list_pages(self) -> list[TrackedPage]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, label, url, enabled FROM tracked_pages ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+
+        return [
+            TrackedPage(id=row[0], label=row[1], url=row[2], enabled=bool(row[3]))
+            for row in rows
+        ]
+
+    def get_page(self, page_id: int) -> TrackedPage:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, label, url, enabled FROM tracked_pages WHERE id = ?",
+                (page_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Страница с указанным ID не найдена")
+        return TrackedPage(id=row[0], label=row[1], url=row[2], enabled=bool(row[3]))
+
+    def get_enabled_urls(self) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT url FROM tracked_pages WHERE enabled = 1 ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+
+        return [row[0] for row in rows]
+
+    def add_page(self, url: str, label: str | None = None) -> TrackedPage:
+        normalized_url = url.strip()
+        if not normalized_url or not normalized_url.startswith(("http://", "https://")):
+            raise ValueError("URL must start with http:// or https://")
+
+        with self._connect() as connection:
+            existing_labels = {
+                row[0]
+                for row in connection.execute("SELECT label FROM tracked_pages").fetchall()
+            }
+            final_label = label.strip() if label and label.strip() else _build_label(normalized_url, existing_labels)
+            timestamp = datetime.now(UTC).isoformat()
+            try:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO tracked_pages (label, url, enabled, created_at)
+                    VALUES (?, ?, 1, ?)
+                    """,
+                    (final_label, normalized_url, timestamp),
+                )
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("URL уже добавлен в отслеживание") from exc
+
+        return TrackedPage(id=cursor.lastrowid, label=final_label, url=normalized_url, enabled=True)
+
+    def toggle_page(self, page_id: int) -> TrackedPage:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
+                (page_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Страница с указанным ID не найдена")
+
+            new_state = 0 if row[2] else 1
+            connection.execute(
+                "UPDATE tracked_pages SET enabled = ? WHERE id = ?",
+                (new_state, page_id),
+            )
+            connection.commit()
+
+        return TrackedPage(id=page_id, label=row[0], url=row[1], enabled=bool(new_state))
+
+    def remove_page(self, page_id: int) -> TrackedPage:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
+                (page_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Страница с указанным ID не найдена")
+
+            connection.execute(
+                "DELETE FROM tracked_pages WHERE id = ?",
+                (page_id,),
+            )
+            connection.commit()
+
+        return TrackedPage(id=page_id, label=row[0], url=row[1], enabled=bool(row[2]))
+
+    def update_label(self, page_id: int, label: str) -> TrackedPage:
+        new_label = label.strip()
+        if not new_label:
+            raise ValueError("Название не может быть пустым")
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT url, enabled FROM tracked_pages WHERE id = ?",
+                (page_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Страница с указанным ID не найдена")
+
+            connection.execute(
+                "UPDATE tracked_pages SET label = ? WHERE id = ?",
+                (new_label, page_id),
+            )
+            connection.commit()
+
+        return TrackedPage(id=page_id, label=new_label, url=row[0], enabled=bool(row[1]))
+
+    def update_sort(self, page_id: int, order: str | None) -> TrackedPage:
+        valid_orders = {"stop", "create", "cost_asc", "cost_desc", "rating"}
+        if order == "":
+            order = None
+        if order is not None and order not in valid_orders:
+            raise ValueError("Неизвестный тип сортировки")
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
+                (page_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Страница с указанным ID не найдена")
+
+            new_url = _apply_order_to_url(row[1], order)
+
+            if new_url != row[1]:
+                connection.execute(
+                    "UPDATE tracked_pages SET url = ? WHERE id = ?",
+                    (new_url, page_id),
+                )
+                connection.commit()
+            else:
+                new_url = row[1]
+
+        return TrackedPage(id=page_id, label=row[0], url=new_url, enabled=bool(row[2]))

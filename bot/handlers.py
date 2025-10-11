@@ -2,19 +2,194 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+from dataclasses import dataclass
+from typing import Dict, Sequence, Tuple
+from urllib.parse import parse_qs, urlparse
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.filters import IsAdmin
 from config import settings
+from models import TrackedPage
 from services.parser import Parser
+from services.storage import TrackedPageRepository
 
 logger = logging.getLogger(__name__)
 router = Router()
 parser = Parser()
+
+
+@dataclass(slots=True)
+class PendingAction:
+    action_type: str
+    page_id: int | None = None
+    prompt_message_id: int | None = None
+    prompt_chat_id: int | None = None
+
+
+_pending_actions: Dict[int, PendingAction] = {}
+_user_filters: Dict[int, str] = {}
+_menu_message_refs: Dict[int, Tuple[int, int]] = {}
+
+FILTER_OPTIONS = (
+    ("all", "Все"),
+    ("active", "Активные"),
+    ("paused", "Пауза"),
+)
+
+SORT_OPTIONS = (
+    ("", "Актуальные"),
+    ("create", "Новые"),
+    ("stop", "Скоро завершатся"),
+    ("cost_asc", "Дешёвые"),
+    ("cost_desc", "Дорогие"),
+    ("rating", "Высокий рейтинг"),
+)
+
+SORT_LABEL_MAP = {key or "": label for key, label in SORT_OPTIONS}
+
+
+def _get_filter(user_id: int | None) -> str:
+    if not user_id:
+        return "all"
+    return _user_filters.get(user_id, "all")
+
+
+def _set_filter(user_id: int, mode: str) -> str:
+    valid_modes = {key for key, _ in FILTER_OPTIONS}
+    target = mode if mode in valid_modes else "all"
+    _user_filters[user_id] = target
+    return target
+
+
+def _order_label(order: str | None) -> str:
+    return SORT_LABEL_MAP.get(order or "", "Актуальные")
+
+
+def _extract_order_from_url(url: str) -> str | None:
+    params = parse_qs(urlparse(url).query)
+    values = params.get("order")
+    if not values:
+        return None
+    return values[0] or None
+
+
+def _build_sort_keyboard(page_id: int, current_order: str | None) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+
+    for key, label in SORT_OPTIONS:
+        is_current = (key or None) == (current_order or None)
+        prefix = "🔘" if is_current else "⚪"
+        token = key if key else "none"
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{prefix} {label}",
+                callback_data=f"tracking:setorder:{page_id}:{token}"
+            )
+        )
+
+    builder.row(
+        InlineKeyboardButton(text="↩️ Назад", callback_data="tracking:refresh"),
+        InlineKeyboardButton(text="✖️ Отмена", callback_data="tracking:cancel"),
+    )
+
+    return builder.as_markup()
+
+
+def _register_menu_message(user_id: int, message: Message) -> None:
+    _menu_message_refs[user_id] = (message.chat.id, message.message_id)
+
+
+async def _delete_previous_menu(bot, user_id: int) -> None:
+    ref = _menu_message_refs.get(user_id)
+    if not ref:
+        return
+    chat_id, message_id = ref
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+
+def _set_pending_action(user_id: int, action: PendingAction) -> None:
+    _pending_actions[user_id] = action
+
+
+def _clear_pending_action(user_id: int) -> None:
+    _pending_actions.pop(user_id, None)
+
+
+async def _cancel_pending_action(bot, user_id: int) -> None:
+    pending = _pending_actions.get(user_id)
+    if not pending:
+        return
+    if pending.prompt_chat_id is not None and pending.prompt_message_id is not None:
+        try:
+            await bot.delete_message(pending.prompt_chat_id, pending.prompt_message_id)
+        except Exception:
+            pass
+    _clear_pending_action(user_id)
+
+
+async def _refresh_menu_message(
+    message: Message,
+    repository: TrackedPageRepository,
+    user_id: int,
+    notice: str | None = None,
+) -> None:
+    pages = repository.list_pages()
+    filter_mode = _get_filter(user_id)
+    overview_text, keyboard = _compose_tracking_overview(pages, filter_mode, notice=notice)
+    await message.edit_text(
+        overview_text,
+        parse_mode='HTML',
+        reply_markup=keyboard,
+    )
+    _register_menu_message(user_id, message)
+
+
+async def _render_menu_for_user(
+    bot,
+    user_id: int,
+    repository: TrackedPageRepository,
+    notice: str | None = None,
+) -> None:
+    pages = repository.list_pages()
+    filter_mode = _get_filter(user_id)
+    overview_text, keyboard = _compose_tracking_overview(pages, filter_mode, notice=notice)
+
+    ref = _menu_message_refs.get(user_id)
+    chat_id: int
+    message_id: int
+
+    if ref:
+        chat_id, message_id = ref
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=overview_text,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+            )
+            _menu_message_refs[user_id] = (chat_id, message_id)
+            return
+        except Exception:
+            pass
+
+    chat_id = ref[0] if ref else user_id
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=overview_text,
+        parse_mode='HTML',
+        reply_markup=keyboard,
+    )
+    _register_menu_message(user_id, sent)
 
 
 async def _fetch_items(url: str):
@@ -25,6 +200,151 @@ async def _fetch_items(url: str):
 def _extract_user_id(message: Message) -> int | None:
     user = message.from_user
     return user.id if user else None
+
+
+def _short_label(label: str, limit: int = 40) -> str:
+    if len(label) <= limit:
+        return label
+    return f"{label[:limit - 1]}…"
+
+
+def _apply_filter(pages: Sequence[TrackedPage], filter_mode: str) -> list[TrackedPage]:
+    if filter_mode == "active":
+        return [page for page in pages if page.enabled]
+    if filter_mode == "paused":
+        return [page for page in pages if not page.enabled]
+    return list(pages)
+
+
+def _build_tracking_keyboard(
+    pages: Sequence[TrackedPage],
+    filter_mode: str,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+
+    filter_buttons = [
+        InlineKeyboardButton(
+            text=("🔘 " if mode == filter_mode else "⚪ ") + label,
+            callback_data=f"tracking:filter:{mode}",
+        )
+        for mode, label in FILTER_OPTIONS
+    ]
+    builder.row(*filter_buttons)
+
+    for page in pages:
+        current_order = _extract_order_from_url(page.url)
+        toggle_text = f"{'✅' if page.enabled else '🚫'} {_short_label(page.label)}"
+        builder.row(
+            InlineKeyboardButton(
+                text=toggle_text,
+                callback_data=f"tracking:toggle:{page.id}"
+            ),
+            InlineKeyboardButton(
+                text="✏️ Название",
+                callback_data=f"tracking:rename:{page.id}"
+            ),
+            InlineKeyboardButton(
+                text="🗑 Удалить",
+                callback_data=f"tracking:remove:{page.id}"
+            ),
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text=f"⚙️ Сортировка: {_order_label(current_order)}",
+                callback_data=f"tracking:sort:{page.id}"
+            ),
+        )
+
+    builder.row(
+        InlineKeyboardButton(text="➕ Добавить", callback_data="tracking:add"),
+        InlineKeyboardButton(text="🔄 Обновить", callback_data="tracking:refresh"),
+    )
+
+    return builder.as_markup()
+
+
+def _compose_tracking_overview(
+    pages: Sequence[TrackedPage],
+    filter_mode: str,
+    notice: str | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    total = len(pages)
+    enabled_total = sum(1 for page in pages if page.enabled)
+
+    filtered_pages = _apply_filter(pages, filter_mode)
+    shown_total = len(filtered_pages)
+
+    parts: list[str] = ["📋 <b>Отслеживаемые страницы</b>"]
+
+    if notice:
+        parts.append(f"\n<i>{notice}</i>")
+
+    parts.append(
+        "\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"Активных: <b>{enabled_total}</b>\n"
+    )
+
+    if filter_mode != "all":
+        label_map = dict(FILTER_OPTIONS)
+        parts.append(f"Отображается: <b>{label_map.get(filter_mode, 'Все')}</b> ({shown_total})\n")
+    elif total != shown_total:
+        parts.append(f"Отображается: <b>{shown_total}</b>\n")
+
+    if not filtered_pages:
+        parts.append(
+            "\nПока ничего не отслеживается. Нажмите кнопку «➕ Добавить» ниже, чтобы выбрать новую страницу."
+        )
+    else:
+        for page in filtered_pages:
+            status = "✅ Активна" if page.enabled else "⏸ Приостановлена"
+            escaped_label = html.escape(page.label)
+            escaped_url = html.escape(page.url)
+            parts.append(
+                "\n"
+                f"<b>{page.id}.</b> {status}\n"
+                f"<a href=\"{escaped_url}\">{escaped_label}</a>\n"
+                f"<code>{escaped_url}</code>"
+            )
+
+    parts.append(
+        "\n\nУправляйте кнопками ниже: включайте/выключайте, меняйте сортировку, переименовывайте, удаляйте или добавляйте новые ссылки."
+    )
+
+    return "".join(parts), _build_tracking_keyboard(filtered_pages, filter_mode)
+
+
+def _parse_add_payload(payload: str) -> tuple[str, str | None]:
+    if not payload:
+        raise ValueError("Укажите URL для добавления")
+
+    url_part, label_part = (payload.split("|", 1) + [""])[:2]
+    url = url_part.strip()
+    label = label_part.strip() or None
+
+    if not url:
+        raise ValueError("Укажите корректный URL")
+
+    return url, label
+
+
+def _parse_rename_payload(payload: str) -> tuple[int, str]:
+    parts = payload.split(maxsplit=1)
+    if len(parts) < 2:
+        raise ValueError("Использование: /tracking rename ID НовоеНазвание")
+
+    page_id = _parse_id(parts[0])
+    new_label = parts[1].strip()
+    if not new_label:
+        raise ValueError("Новое название не может быть пустым")
+    return page_id, new_label
+
+
+def _parse_id(payload: str) -> int:
+    try:
+        return int(payload.strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Укажите числовой ID") from exc
 
 
 @router.message(CommandStart())
@@ -47,6 +367,7 @@ async def cmd_start(message: Message) -> None:
             "📋 Доступные команды:\n"
             "/start - Запустить бота\n"
             "/status - Статус мониторинга\n"
+            "/tracking - Управление отслеживаемыми страницами\n"
             "/test <url> - Протестировать парсинг URL\n"
             "/help - Помощь",
             parse_mode='HTML'
@@ -56,6 +377,73 @@ async def cmd_start(message: Message) -> None:
             "👋 Привет! Этот бот предназначен только для администраторов.",
             parse_mode='HTML'
         )
+
+
+@router.message(Command("tracking"), IsAdmin())
+async def cmd_tracking(message: Message) -> None:
+    """Display and manage tracked pages configuration."""
+
+    repository = TrackedPageRepository()
+    text = message.text or ""
+    parts = text.split(maxsplit=2)
+    notice: str | None = None
+
+    user_id = _extract_user_id(message)
+    if not user_id:
+        await message.answer("Не удалось определить пользователя", parse_mode='HTML')
+        return
+
+    bot = message.bot
+    if bot is None:
+        await message.answer("Бот недоступен", parse_mode='HTML')
+        return
+
+    await _cancel_pending_action(bot, user_id)
+
+    if len(parts) > 1:
+        action = parts[1].lower()
+        payload = parts[2] if len(parts) > 2 else ""
+
+        try:
+            if action == "add":
+                url, label = _parse_add_payload(payload)
+                page = repository.add_page(url, label)
+                notice = (
+                    f"Добавлена новая страница: <b>{html.escape(page.label)}</b>"
+                )
+            elif action in {"rename", "label"}:
+                page_id, new_label = _parse_rename_payload(payload)
+                page = repository.update_label(page_id, new_label)
+                notice = f"Название обновлено: <b>{html.escape(page.label)}</b>"
+            elif action in {"toggle", "switch"}:
+                page_id = _parse_id(payload)
+                page = repository.toggle_page(page_id)
+                state_text = "активирована" if page.enabled else "отключена"
+                notice = (
+                    f"Страница <b>{html.escape(page.label)}</b> {state_text}."
+                )
+            elif action in {"remove", "delete"}:
+                page_id = _parse_id(payload)
+                removed = repository.remove_page(page_id)
+                notice = f"Удалена <b>{html.escape(removed.label)}</b>."
+            else:
+                raise ValueError(
+                    "Неизвестное действие. Доступно: add, rename, toggle, remove"
+                )
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML'
+            )
+            return
+
+    await _delete_previous_menu(bot, user_id)
+
+    pages = repository.list_pages()
+    filter_mode = _get_filter(user_id)
+    overview_text, keyboard = _compose_tracking_overview(pages, filter_mode, notice=notice)
+    sent = await message.answer(overview_text, parse_mode='HTML', reply_markup=keyboard)
+    _register_menu_message(user_id, sent)
 
 
 @router.message(Command("status"), IsAdmin())
@@ -69,17 +457,28 @@ async def cmd_status(message: Message) -> None:
     user_id = _extract_user_id(message)
     logger.info("Admin %s requested status", user_id)
 
+    repository = TrackedPageRepository()
+    pages = repository.list_pages()
+    active_count = sum(1 for page in pages if page.enabled)
+
     status_text = (
         "📊 <b>Статус мониторинга</b>\n\n"
         f"⏱ Интервал проверки: {settings.CHECK_INTERVAL_MINUTES} минут\n"
-        f"🔗 Количество URL: {len(settings.MONITOR_URLS)}\n"
+        f"🔗 Всего страниц: {len(pages)} (активных: {active_count})\n"
         f"👥 Количество админов: {len(settings.ADMIN_CHAT_IDS)}\n\n"
         "<b>Отслеживаемые URL:</b>\n"
     )
-    
-    for i, url in enumerate(settings.MONITOR_URLS, 1):
-        status_text += f"{i}. {url}\n"
-    
+
+    if not pages:
+        status_text += "— Пока ничего не настроено. Откройте /tracking и нажмите «➕ Добавить».\n"
+    else:
+        for page in pages:
+            icon = "✅" if page.enabled else "⏸"
+            status_text += (
+                f"{page.id}. {icon} {page.label}\n"
+                f"    {page.url}\n"
+            )
+
     await message.answer(status_text, parse_mode='HTML')
 
 
@@ -101,6 +500,7 @@ async def cmd_help(message: Message) -> None:
         "<b>Доступные команды:</b>\n"
         "/start - Запустить бота и увидеть приветствие\n"
         "/status - Посмотреть текущий статус мониторинга\n"
+        "/tracking - Управлять списком отслеживаемых страниц\n"
         "/test <url> - Протестировать парсинг URL\n"
         "/help - Показать эту справку\n\n"
         "💡 Бот работает автоматически в фоновом режиме и проверяет новые лоты "
@@ -110,6 +510,236 @@ async def cmd_help(message: Message) -> None:
     await message.answer(help_text, parse_mode='HTML')
 
 
+@router.callback_query(IsAdmin(), F.data.startswith("tracking:"))
+async def tracking_callback(call: CallbackQuery) -> None:
+    """Handle inline actions for tracking management."""
+
+    message = call.message
+    if not isinstance(message, Message):
+        await call.answer("Нет доступа к сообщению", show_alert=True)
+        return
+
+    user_id = call.from_user.id if call.from_user else None
+    if not user_id:
+        await call.answer("Пользователь неизвестен", show_alert=True)
+        return
+
+    bot = message.bot
+    if bot is None:
+        await call.answer("Бот недоступен", show_alert=True)
+        return
+
+    repository = TrackedPageRepository()
+    data_parts = (call.data or "").split(":")
+
+    if len(data_parts) < 2:
+        await call.answer("Некорректное действие", show_alert=True)
+        return
+
+    action = data_parts[1]
+    payload = data_parts[2] if len(data_parts) > 2 else ""
+
+    notice: str | None = None
+    need_refresh = False
+
+    try:
+        if action == "toggle":
+            page_id = _parse_id(payload)
+            page = repository.toggle_page(page_id)
+            state_text = "активирована" if page.enabled else "отключена"
+            notice = f"Страница <b>{html.escape(page.label)}</b> {state_text}."
+            need_refresh = True
+            await _cancel_pending_action(bot, user_id)
+            await call.answer("Состояние обновлено")
+        elif action == "remove":
+            page_id = _parse_id(payload)
+            removed = repository.remove_page(page_id)
+            notice = f"Удалена <b>{html.escape(removed.label)}</b>."
+            need_refresh = True
+            await _cancel_pending_action(bot, user_id)
+            await call.answer("Страница удалена")
+        elif action == "refresh":
+            need_refresh = True
+            await _cancel_pending_action(bot, user_id)
+            await call.answer("Обновлено")
+        elif action == "filter":
+            mode = payload or "all"
+            applied = _set_filter(user_id, mode)
+            label = dict(FILTER_OPTIONS).get(applied, "Все")
+            notice = f"Отфильтровано: <b>{label}</b>"
+            need_refresh = True
+            await _cancel_pending_action(bot, user_id)
+            await call.answer("Фильтр применён")
+        elif action == "sort":
+            if len(data_parts) < 3:
+                await call.answer("Некорректное действие", show_alert=True)
+                return
+            page_id = _parse_id(data_parts[2])
+            page = repository.get_page(page_id)
+            await _cancel_pending_action(bot, user_id)
+            prompt = await message.answer(
+                (
+                    "Выберите сортировку для <b>{label}</b>"
+                ).format(label=html.escape(page.label)),
+                parse_mode='HTML',
+                reply_markup=_build_sort_keyboard(page_id, _extract_order_from_url(page.url)),
+            )
+            _set_pending_action(
+                user_id,
+                PendingAction(
+                    action_type="sort",
+                    page_id=page_id,
+                    prompt_message_id=prompt.message_id,
+                    prompt_chat_id=prompt.chat.id,
+                ),
+            )
+            await call.answer("Выберите вариант")
+            return
+        elif action == "setorder":
+            if len(data_parts) < 4:
+                await call.answer("Некорректное действие", show_alert=True)
+                return
+            page_id = _parse_id(data_parts[2])
+            order_token = data_parts[3]
+            selected_order = None if order_token in {"none", ""} else order_token
+            page = repository.update_sort(page_id, selected_order)
+            notice = (
+                f"Сортировка <b>{html.escape(_order_label(selected_order))}</b> "
+                f"для <b>{html.escape(page.label)}</b>"
+            )
+            await _cancel_pending_action(bot, user_id)
+            await _render_menu_for_user(bot, user_id, repository, notice=notice)
+            await call.answer("Сортировка применена")
+            return
+        elif action == "cancel":
+            await _cancel_pending_action(bot, user_id)
+            await call.answer("Действие отменено")
+            return
+        elif action == "add":
+            await _cancel_pending_action(bot, user_id)
+            prompt = await message.answer(
+                "Введите страницу в формате <b>URL</b> или <b>URL | название</b>",
+                parse_mode='HTML',
+                reply_markup=ForceReply(selective=True),
+            )
+            _set_pending_action(
+                user_id,
+                PendingAction(
+                    action_type="add",
+                    prompt_message_id=prompt.message_id,
+                    prompt_chat_id=prompt.chat.id,
+                ),
+            )
+            await call.answer("Жду ссылку")
+            return
+        elif action == "rename":
+            await _cancel_pending_action(bot, user_id)
+            page_id = _parse_id(payload)
+            page = repository.get_page(page_id)
+            prompt = await message.answer(
+                (
+                    "Новое название для страницы <b>{label}</b>\n"
+                    "Просто отправьте текст сообщением."
+                ).format(label=html.escape(page.label)),
+                parse_mode='HTML',
+                reply_markup=ForceReply(selective=True),
+            )
+            _set_pending_action(
+                user_id,
+                PendingAction(
+                    action_type="rename",
+                    page_id=page_id,
+                    prompt_message_id=prompt.message_id,
+                    prompt_chat_id=prompt.chat.id,
+                ),
+            )
+            await call.answer("Введите название")
+            return
+        else:
+            await call.answer("Неизвестное действие", show_alert=True)
+            return
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
+        return
+
+    if need_refresh:
+        await _refresh_menu_message(message, repository, user_id, notice=notice)
+
+
+@router.message(IsAdmin(), F.reply_to_message)
+async def tracking_reply_handler(message: Message) -> None:
+    """Process replies to ForceReply prompts for tracking actions."""
+
+    user_id = _extract_user_id(message)
+    if not user_id:
+        return
+
+    pending = _pending_actions.get(user_id)
+    if not pending:
+        return
+
+    reply_message = message.reply_to_message
+    if not reply_message or pending.prompt_message_id != reply_message.message_id:
+        return
+
+    bot = message.bot
+    if bot is None:
+        return
+
+    repository = TrackedPageRepository()
+    text = (message.text or "").strip()
+
+    if not text:
+        await message.answer(
+            "❌ <b>Ошибка:</b> сообщение не должно быть пустым",
+            parse_mode='HTML'
+        )
+        return
+
+    if text.lower() in {"/cancel", "cancel", "отмена"}:
+        await message.answer("Действие отменено", parse_mode='HTML')
+        await _cancel_pending_action(bot, user_id)
+        try:
+            await bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
+        return
+
+    notice: str | None = None
+
+    try:
+        if pending.action_type == "add":
+            url, label = _parse_add_payload(text)
+            page = repository.add_page(url, label)
+            notice = f"Добавлена <b>{html.escape(page.label)}</b>"
+        elif pending.action_type == "rename":
+            if pending.page_id is None:
+                raise ValueError("Неизвестная страница")
+            page = repository.update_label(pending.page_id, text)
+            notice = f"Название обновлено: <b>{html.escape(page.label)}</b>"
+        else:
+            return
+    except ValueError as exc:
+        await message.answer(
+            f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+            parse_mode='HTML'
+        )
+        return
+    finally:
+        _clear_pending_action(user_id)
+
+    if pending.prompt_chat_id is not None and pending.prompt_message_id is not None:
+        try:
+            await bot.delete_message(pending.prompt_chat_id, pending.prompt_message_id)
+        except Exception:
+            pass
+
+    try:
+        await bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+
+    await _render_menu_for_user(bot, user_id, repository, notice=notice)
 @router.message(Command("test"), IsAdmin())
 async def cmd_test(message: Message) -> None:
     """
