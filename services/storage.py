@@ -384,3 +384,113 @@ class TrackedPageRepository:
                 new_url = row[1]
 
         return TrackedPage(id=page_id, label=row[0], url=new_url, enabled=bool(row[2]))
+
+
+class AppSettingsRepository:
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path or settings.DB_PATH
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._default_interval = settings.CHECK_INTERVAL_MINUTES
+        self._base_admin_ids = tuple(settings.ADMIN_CHAT_IDS)
+        self._initialize()
+        self.sync_settings()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
+
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            connection.commit()
+
+    def _get_meta(self, key: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM app_meta WHERE key = ?",
+                (key,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            connection.commit()
+
+    def _load_extra_admins(self) -> list[int]:
+        raw = self._get_meta("admin_chat_ids")
+        if not raw:
+            return []
+        extras: list[int] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                extras.append(int(part))
+            except ValueError:
+                continue
+        return extras
+
+    def _save_extra_admins(self, admins: list[int]) -> None:
+        value = ",".join(str(chat_id) for chat_id in admins)
+        self._set_meta("admin_chat_ids", value)
+
+    def get_check_interval(self) -> int:
+        raw = self._get_meta("check_interval_minutes")
+        if not raw:
+            return self._default_interval
+        try:
+            minutes = int(raw)
+        except ValueError:
+            return self._default_interval
+        return minutes if minutes > 0 else self._default_interval
+
+    def set_check_interval(self, minutes: int) -> int:
+        if minutes <= 0:
+            raise ValueError("Интервал должен быть положительным")
+        self._set_meta("check_interval_minutes", str(minutes))
+        settings.CHECK_INTERVAL_MINUTES = minutes
+        return minutes
+
+    def get_admin_ids(self) -> tuple[int, ...]:
+        extras = self._load_extra_admins()
+        merged: list[int] = []
+        for chat_id in [*self._base_admin_ids, *extras]:
+            if chat_id not in merged:
+                merged.append(chat_id)
+        return tuple(merged)
+
+    def add_admin(self, chat_id: int | str) -> tuple[int, ...]:
+        try:
+            new_id = int(chat_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ID администратора должен быть целым числом") from exc
+
+        if new_id <= 0:
+            raise ValueError("ID администратора должен быть положительным")
+
+        current = set(self.get_admin_ids())
+        if new_id in current:
+            raise ValueError("Администратор уже добавлен")
+
+        extras = self._load_extra_admins()
+        extras.append(new_id)
+        self._save_extra_admins(extras)
+        updated = self.get_admin_ids()
+        settings.ADMIN_CHAT_IDS = updated
+        return updated
+
+    def sync_settings(self) -> None:
+        interval = self.get_check_interval()
+        settings.CHECK_INTERVAL_MINUTES = interval
+        settings.ADMIN_CHAT_IDS = self.get_admin_ids()

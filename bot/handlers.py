@@ -19,12 +19,14 @@ from bot.filters import IsAdmin
 from config import settings
 from models import Item, TrackedPage
 from services.parser import Parser
-from services.storage import ItemRepository, TrackedPageRepository
+from services.runtime import update_monitor_interval
+from services.storage import AppSettingsRepository, ItemRepository, TrackedPageRepository
 
 logger = logging.getLogger(__name__)
 router = Router()
 parser = Parser()
 item_repository = ItemRepository()
+app_settings = AppSettingsRepository()
 
 
 @dataclass(slots=True)
@@ -38,6 +40,7 @@ class PendingAction:
 _pending_actions: Dict[int, PendingAction] = {}
 _user_filters: Dict[int, str] = {}
 _menu_message_refs: Dict[int, Tuple[int, int]] = {}
+_settings_message_refs: Dict[int, Tuple[int, int]] = {}
 
 
 @dataclass(slots=True)
@@ -62,6 +65,122 @@ SORT_OPTIONS = (
 )
 
 SORT_LABEL_MAP = {key or "": label for key, label in SORT_OPTIONS}
+
+
+def _plural_category(value: int) -> str:
+    val = abs(int(value))
+    if val % 10 == 1 and val % 100 != 11:
+        return "one"
+    if 2 <= val % 10 <= 4 and not 12 <= val % 100 <= 14:
+        return "few"
+    return "many"
+
+
+def _minute_form(value: int, case: str = "nominative") -> str:
+    forms = {
+        "nominative": {
+            "one": "минута",
+            "few": "минуты",
+            "many": "минут",
+        },
+        "accusative": {
+            "one": "минуту",
+            "few": "минуты",
+            "many": "минут",
+        },
+    }
+    case_forms = forms.get(case, forms["nominative"])
+    return case_forms[_plural_category(value)]
+
+
+def _format_minutes(value: int, case: str = "nominative") -> str:
+    return f"{value} {_minute_form(value, case)}"
+
+
+def _format_interval_phrase(value: int) -> str:
+    prefix = "каждую" if _plural_category(value) == "one" else "каждые"
+    return f"{prefix} {_format_minutes(value, case='accusative')}"
+
+
+def _format_admin_list(admin_ids: Sequence[int]) -> str:
+    if not admin_ids:
+        return "— <i>Список пуст</i>"
+    return "\n".join(f"• <code>{chat_id}</code>" for chat_id in admin_ids)
+
+
+def _build_settings_overview() -> str:
+    interval = settings.CHECK_INTERVAL_MINUTES
+    admins = app_settings.get_admin_ids()
+    return (
+        "⚙️ <b>Настройки бота</b>\n\n"
+        f"⏱ Интервал проверки: {_format_minutes(interval)}\n"
+        "👥 Администраторы:\n"
+        f"{_format_admin_list(admins)}\n\n"
+        "<b>Доступные команды:</b>\n"
+        "/settings interval &lt;минуты&gt; — изменить интервал проверок\n"
+        "/settings add_admin &lt;chat_id&gt; — добавить администратора"
+    )
+
+
+def _build_settings_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="➖ 5", callback_data="settings:interval:-5"),
+        InlineKeyboardButton(text="➖ 1", callback_data="settings:interval:-1"),
+        InlineKeyboardButton(text="➕ 1", callback_data="settings:interval:1"),
+        InlineKeyboardButton(text="➕ 5", callback_data="settings:interval:5"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить", callback_data="settings:refresh"),
+        InlineKeyboardButton(text="➕ Добавить админа", callback_data="settings:add"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="✖️ Закрыть", callback_data="settings:close"),
+    )
+    return builder.as_markup()
+
+
+def _register_settings_message(user_id: int, message: Message) -> None:
+    _settings_message_refs[user_id] = (message.chat.id, message.message_id)
+
+
+def _clear_settings_message(user_id: int) -> None:
+    _settings_message_refs.pop(user_id, None)
+
+
+async def _render_settings_menu(bot, user_id: int, chat_id: int | None = None) -> None:
+    overview = _build_settings_overview()
+    keyboard = _build_settings_keyboard()
+
+    ref = _settings_message_refs.get(user_id)
+    if ref:
+        chat_id_ref, message_id = ref
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id_ref,
+                message_id=message_id,
+                text=overview,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+            )
+            return
+        except TelegramBadRequest as exc:
+            lowered = str(exc).lower()
+            if "message is not modified" in lowered:
+                return
+            if "message to edit not found" not in lowered:
+                raise
+        except Exception:
+            pass
+
+    target_chat = chat_id if chat_id is not None else (ref[0] if ref else user_id)
+    sent = await bot.send_message(
+        chat_id=target_chat,
+        text=overview,
+        parse_mode='HTML',
+        reply_markup=keyboard,
+    )
+    _register_settings_message(user_id, sent)
 
 
 def _get_filter(user_id: int | None) -> str:
@@ -205,11 +324,6 @@ async def _render_menu_for_user(
         reply_markup=keyboard,
     )
     _register_menu_message(user_id, sent)
-
-
-async def _fetch_items(url: str):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, parser.get_items_from_url, url)
 
 
 def _extract_user_id(message: Message) -> int | None:
@@ -496,7 +610,7 @@ async def cmd_start(message: Message) -> None:
             "/start - Запустить бота\n"
             "/status - Статус мониторинга\n"
             "/tracking - Управление отслеживаемыми страницами\n"
-            "/test <url> - Протестировать парсинг URL\n"
+            "/settings - Настройки бота\n"
             "/help - Помощь",
             parse_mode='HTML'
         )
@@ -589,9 +703,11 @@ async def cmd_status(message: Message) -> None:
     pages = repository.list_pages()
     active_count = sum(1 for page in pages if page.enabled)
 
+    interval = settings.CHECK_INTERVAL_MINUTES
+
     status_text = (
         "📊 <b>Статус мониторинга</b>\n\n"
-        f"⏱ Интервал проверки: {settings.CHECK_INTERVAL_MINUTES} минут\n"
+        f"⏱ Интервал проверки: {_format_minutes(interval)}\n"
         f"🔗 Всего страниц: {len(pages)} (активных: {active_count})\n"
         f"👥 Количество админов: {len(settings.ADMIN_CHAT_IDS)}\n\n"
         "<b>Отслеживаемые URL:</b>\n"
@@ -629,13 +745,186 @@ async def cmd_help(message: Message) -> None:
         "/start - Запустить бота и увидеть приветствие\n"
         "/status - Посмотреть текущий статус мониторинга\n"
         "/tracking - Управлять списком отслеживаемых страниц\n"
-        "/test <url> - Протестировать парсинг URL\n"
+        "/settings - Настроить проверки и админов\n"
         "/help - Показать эту справку\n\n"
         "💡 Бот работает автоматически в фоновом режиме и проверяет новые лоты "
-        f"каждые {settings.CHECK_INTERVAL_MINUTES} минут."
+        f"{_format_interval_phrase(settings.CHECK_INTERVAL_MINUTES)}."
     )
     
     await message.answer(help_text, parse_mode='HTML')
+
+
+@router.message(Command("settings"), IsAdmin())
+async def cmd_settings(message: Message) -> None:
+    """Handle /settings command for administrators."""
+
+    user_id = _extract_user_id(message)
+    if user_id is None:
+        return
+    logger.info("Admin %s requested settings", user_id)
+
+    bot = message.bot
+    if bot is None:
+        return
+
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=2)
+
+    if len(parts) == 1:
+        await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        return
+
+    action = parts[1].lower()
+    payload = parts[2] if len(parts) > 2 else ""
+
+    if action in {"interval", "интервал"}:
+        value = payload.strip()
+        if not value:
+            await message.answer(
+                "❌ <b>Ошибка:</b> укажите количество минут. Пример: <code>/settings interval 5</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            minutes = int(value)
+        except ValueError:
+            await message.answer(
+                "❌ <b>Ошибка:</b> интервал должен быть целым числом.",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            new_value = app_settings.set_check_interval(minutes)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML',
+            )
+            return
+
+        update_monitor_interval(new_value)
+        await message.answer(
+            "⏱ <b>Интервал обновлён</b>\n"
+            f"Проверки выполняются {_format_interval_phrase(new_value)}.",
+            parse_mode='HTML',
+        )
+        await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        return
+
+    if action in {"add_admin", "add", "admin"}:
+        value = payload.strip()
+        if not value:
+            await message.answer(
+                "❌ <b>Ошибка:</b> укажите ID пользователя. Пример: <code>/settings add_admin 123456789</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            updated_admins = app_settings.add_admin(value)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML',
+            )
+            return
+
+        await message.answer(
+            "👥 <b>Администратор добавлен</b>\n"
+            f"Теперь администраторов: {len(updated_admins)}.",
+            parse_mode='HTML',
+        )
+        await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        return
+
+    await message.answer(
+        (
+            "❌ <b>Неизвестное действие.</b>\n"
+            "Используйте: <code>/settings</code>, <code>/settings interval &lt;минуты&gt;</code>, "
+            "<code>/settings add_admin &lt;chat_id&gt;</code>"
+        ),
+        parse_mode='HTML',
+    )
+
+
+@router.callback_query(IsAdmin(), F.data.startswith("settings:"))
+async def settings_callback(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else None
+    if user_id is None:
+        await call.answer("Пользователь неизвестен", show_alert=True)
+        return
+
+    message = call.message
+    if message is None:
+        await call.answer("Сообщение недоступно", show_alert=True)
+        return
+
+    bot = message.bot
+    if bot is None:
+        await call.answer()
+        return
+
+    data = call.data or ""
+    parts = data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    payload = parts[2] if len(parts) > 2 else ""
+
+    try:
+        if action == "interval":
+            try:
+                delta = int(payload)
+            except ValueError:
+                await call.answer("Некорректное значение", show_alert=True)
+                return
+            current = settings.CHECK_INTERVAL_MINUTES
+            new_value = current + delta
+            if new_value <= 0:
+                await call.answer("Минимальный интервал — 1 минута", show_alert=True)
+                return
+            app_settings.set_check_interval(new_value)
+            update_monitor_interval(new_value)
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+            await call.answer(f"Интервал: {_format_minutes(new_value)}")
+            return
+
+        if action == "refresh":
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+            await call.answer("Обновлено")
+            return
+
+        if action == "add":
+            await _cancel_pending_action(bot, user_id)
+            prompt = await message.answer(
+                "Введите ID администратора, которого нужно добавить:",
+                parse_mode='HTML',
+                reply_markup=ForceReply(selective=True),
+            )
+            _set_pending_action(
+                user_id,
+                PendingAction(
+                    action_type="settings_add_admin",
+                    prompt_message_id=prompt.message_id,
+                    prompt_chat_id=prompt.chat.id,
+                ),
+            )
+            await call.answer("Жду ID администратора")
+            return
+
+        if action == "close":
+            ref = _settings_message_refs.pop(user_id, None)
+            if ref:
+                try:
+                    await bot.delete_message(ref[0], ref[1])
+                except Exception:
+                    pass
+            await call.answer()
+            return
+
+        await call.answer("Неизвестное действие", show_alert=True)
+    except ValueError as exc:
+        await call.answer(str(exc), show_alert=True)
 
 
 @router.callback_query(IsAdmin(), F.data.startswith("tracking:"))
@@ -861,7 +1150,6 @@ async def tracking_reply_handler(message: Message) -> None:
     if bot is None:
         return
 
-    repository = TrackedPageRepository()
     text = (message.text or "").strip()
 
     if not text:
@@ -881,13 +1169,44 @@ async def tracking_reply_handler(message: Message) -> None:
         return
 
     notice: str | None = None
+    action_type = pending.action_type
+
+    if action_type == "settings_add_admin":
+        try:
+            updated_admins = app_settings.add_admin(text)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML'
+            )
+        else:
+            await message.answer(
+                "👥 <b>Администратор добавлен</b>\n"
+                f"Теперь администраторов: {len(updated_admins)}.",
+                parse_mode='HTML'
+            )
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        finally:
+            _clear_pending_action(user_id)
+            if pending.prompt_chat_id is not None and pending.prompt_message_id is not None:
+                try:
+                    await bot.delete_message(pending.prompt_chat_id, pending.prompt_message_id)
+                except Exception:
+                    pass
+            try:
+                await bot.delete_message(message.chat.id, message.message_id)
+            except Exception:
+                pass
+        return
+
+    repository = TrackedPageRepository()
 
     try:
-        if pending.action_type == "add":
+        if action_type == "add":
             url, label = _parse_add_payload(text)
             page = repository.add_page(url, label)
             notice = f"Добавлена <b>{html.escape(page.label)}</b>"
-        elif pending.action_type == "rename":
+        elif action_type == "rename":
             if pending.page_id is None:
                 raise ValueError("Неизвестная страница")
             page = repository.update_label(pending.page_id, text)
@@ -915,131 +1234,6 @@ async def tracking_reply_handler(message: Message) -> None:
         pass
 
     await _render_menu_for_user(bot, user_id, repository, notice=notice)
-@router.message(Command("test"), IsAdmin())
-async def cmd_test(message: Message) -> None:
-    """
-    Handler for /test command (admin only)
-    Test parsing a specific URL
-    
-    Args:
-        message: Incoming message
-    """
-    user_id = _extract_user_id(message)
-    logger.info("Admin %s requested test", user_id)
 
-    bot = message.bot
-
-    if not user_id or bot is None:
-        await message.answer(
-            "❌ <b>Ошибка!</b>\n\n"
-            "Не удалось определить пользователя.",
-            parse_mode='HTML'
-        )
-        return
-
-    command_parts = (message.text or "").split(maxsplit=1)
-
-    if len(command_parts) < 2:
-        await bot.send_message(
-            chat_id=user_id,
-            text=(
-                "❌ <b>Ошибка!</b>\n\n"
-                "Использование: <code>/test URL</code>\n\n"
-                "Пример:\n"
-                "<code>/test https://coins.ay.by/sssr/yubilejnye/iz-dragocennyh-metallov/</code>"
-            ),
-            parse_mode='HTML'
-        )
-        return
-
-    url = command_parts[1].strip()
-
-    if not url.startswith('http'):
-        await bot.send_message(
-            chat_id=user_id,
-            text=(
-                "❌ <b>Ошибка!</b>\n\n"
-                "URL должен начинаться с http:// или https://"
-            ),
-            parse_mode='HTML'
-        )
-        return
-
-    status_msg = await bot.send_message(
-        chat_id=user_id,
-        text=(
-            "⏳ <b>Проверяю URL...</b>\n"
-            f"URL: <code>{url}</code>"
-        ),
-        parse_mode='HTML'
-    )
-
-    try:
-        items = await _fetch_items(url)
-
-        if not items:
-            await status_msg.edit_text(
-                "⚠️ <b>Результат теста</b>\n\n"
-                f"URL: <code>{url}</code>\n\n"
-                "❌ Не найдено ни одного товара!\n"
-                "Возможно, структура сайта изменилась или страница пуста.",
-                parse_mode='HTML'
-            )
-            return
-        
-        summary_text = (
-            "✅ <b>Результат теста</b>\n\n"
-            f"URL: <code>{url}</code>\n"
-            f"📦 Найдено товаров: <b>{len(items)}</b>\n\n"
-            "Отправляю информацию о товарах..."
-        )
-        await status_msg.edit_text(summary_text, parse_mode='HTML')
-
-        for i, item in enumerate(items, 1):
-            try:
-                caption = (
-                    f"🔹 <b>Товар {i}/{len(items)}</b>\n\n"
-                    f"<b>{item.title}</b>\n"
-                    f"💰 Цена: {item.price}\n"
-                    f"🔗 {item.url}"
-                )
-                
-                await bot.send_photo(
-                    chat_id=user_id,
-                    photo=item.img_url,
-                    caption=caption,
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.exception("Error sending item %s", i)
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=f"❌ Ошибка отправки товара {i}: {item.title}",
-                    parse_mode='HTML'
-                )
-
-        await bot.send_message(
-            chat_id=user_id,
-            text=(
-                f"✅ <b>Тест завершён!</b>\n\n"
-                f"Отправлено: {len(items)} товар(ов)"
-            ),
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        logger.exception("Error in test command")
-        await status_msg.edit_text(
-            "❌ <b>Ошибка!</b>\n\n"
-            f"Не удалось получить данные с URL:\n"
-            f"<code>{url}</code>\n\n"
-            f"Ошибка: {str(e)}",
-            parse_mode='HTML'
-        )
-
-    if message.chat.id != user_id:
-        await message.reply(
-            "📬 Результаты отправлены вам в личные сообщения.",
-            quote=True
-        )
 
 

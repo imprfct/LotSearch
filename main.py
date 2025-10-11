@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot import router
 from config import settings
 from services import Monitor
+from services.runtime import configure_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,12 +31,13 @@ async def main() -> None:
     monitor = Monitor(bot)
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
+    monitor_job = scheduler.add_job(
         monitor.check_new_items,
         "interval",
         minutes=settings.CHECK_INTERVAL_MINUTES,
         coalesce=True,
     )
+    configure_scheduler(scheduler, monitor_job)
     scheduler.start()
 
     logger.info(

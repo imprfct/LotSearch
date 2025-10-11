@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from html import escape
 
 from aiogram import Bot
 
@@ -69,20 +70,31 @@ class Monitor:
     
     async def _send_notification(self, item: Item) -> None:
         """Send notification about new item to all admins."""
+        title = escape(item.title)
+        price = escape(str(item.price))
+        url = escape(item.url, quote=True)
+
         caption = (
-            f"🆕 <b>{item.title}</b>\n"
-            f"Цена: {item.price}\n"
-            f"🔗 {item.url}"
+            f"🆕 <b>{title}</b>\n"
+            f"Цена: {price}\n"
+            f"🔗 <a href=\"{url}\">{url}</a>"
         )
 
         for chat_id in settings.ADMIN_CHAT_IDS:
             try:
-                await self.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=item.img_url,
-                    caption=caption,
-                    parse_mode='HTML'
-                )
+                if item.img_url:
+                    await self.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=item.img_url,
+                        caption=caption,
+                        parse_mode='HTML'
+                    )
+                else:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=caption,
+                        parse_mode='HTML'
+                    )
                 logger.info("Notification sent to %s for: %s", chat_id, item.title)
-            except Exception as e:
+            except Exception:
                 logger.exception("Error sending notification to %s for %s", chat_id, item.title)
