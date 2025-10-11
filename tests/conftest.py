@@ -1,18 +1,19 @@
-"""
-Pytest configuration and fixtures
-"""
+"""Pytest configuration and fixtures."""
+from __future__ import annotations
+
 import pytest
-import os
-from typing import Generator
+
+from config import settings
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def mock_env_vars(monkeypatch) -> None:
     """Set up test environment variables"""
     monkeypatch.setenv('BOT_TOKEN', 'test_token_123456')
     monkeypatch.setenv('ADMIN_CHAT_IDS', '123456789,987654321')
     monkeypatch.setenv('CHECK_INTERVAL_MINUTES', '60')
     monkeypatch.setenv('MONITOR_URLS', 'https://example.com/page1,https://example.com/page2')
+    settings.reload()
 
 
 @pytest.fixture
@@ -21,15 +22,17 @@ def sample_html() -> str:
     return """
     <html>
         <body>
-            <div class="product-card">
-                <a class="product-card__name" href="/item1">Test Item 1</a>
-                <img class="product-card__image" src="https://example.com/img1.jpg" />
-                <div class="product-card__price">100 BYN</div>
+            <div class="item-type-card__card">
+                <a class="item-type-card__link" href="https://ay.by/lot/item1">Test Item 1</a>
+                <img src="https://example.com/img1.jpg" />
+                <span>100,00</span>
+                <span>бел. руб.</span>
             </div>
-            <div class="product-card">
-                <a class="product-card__name" href="/item2">Test Item 2</a>
-                <img class="product-card__image" src="https://example.com/img2.jpg" />
-                <div class="product-card__price">200 BYN</div>
+            <div class="item-type-card__card">
+                <a class="item-type-card__link" href="https://ay.by/lot/item2">Test Item 2</a>
+                <img src="https://example.com/img2.jpg" />
+                <span>200,50</span>
+                <span>бел. руб.</span>
             </div>
         </body>
     </html>

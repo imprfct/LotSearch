@@ -4,7 +4,7 @@ Data models for the application
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(slots=True)
 class Item:
     """Represents a lot/item from the website"""
     url: str

@@ -1,12 +1,16 @@
-"""
-Tests for Parser service - critical functionality
-"""
+"""Tests for Parser service - critical functionality."""
+from __future__ import annotations
+
+import os
+from unittest.mock import Mock, patch
+
 import pytest
 import requests
-from unittest.mock import Mock, patch
 
 from services.parser import Parser
 from models import Item
+
+LIVE_TESTS_ENABLED = os.getenv("ENABLE_LIVE_TESTS") == "1"
 
 
 class TestParser:
@@ -19,10 +23,10 @@ class TestParser:
         
         assert len(items) == 2
         assert items[0].title == "Test Item 1"
-        assert items[0].price == "100 BYN"
-        assert items[0].url == "https://coins.ay.by/item1"
+        assert items[0].price == "100,00 бел. руб."
+        assert items[0].url == "https://ay.by/lot/item1"
         assert items[1].title == "Test Item 2"
-        assert items[1].price == "200 BYN"
+        assert items[1].price == "200,50 бел. руб."
     
     def test_parse_items_from_empty_html(self, invalid_html):
         """Test parsing from HTML without products"""
@@ -34,14 +38,15 @@ class TestParser:
     def test_parse_items_handles_malformed_cards(self):
         """Test parser handles incomplete product cards gracefully"""
         html = """
-        <div class="product-card">
-            <a class="product-card__name" href="/item1">Item 1</a>
+        <div class="item-type-card__card">
+            <a class="item-type-card__link" href="https://ay.by/lot/item1">Item 1</a>
             <!-- Missing image and price -->
         </div>
-        <div class="product-card">
-            <a class="product-card__name" href="/item2">Item 2</a>
-            <img class="product-card__image" src="img2.jpg" />
-            <div class="product-card__price">200 BYN</div>
+        <div class="item-type-card__card">
+            <a class="item-type-card__link" href="https://ay.by/lot/item2">Item 2</a>
+            <img src="img2.jpg" />
+            <span>200,00</span>
+            <span>бел. руб.</span>
         </div>
         """
         parser = Parser()
@@ -118,6 +123,7 @@ class TestParserLiveConnection:
     """Test parser with real website - critical check"""
     
     @pytest.mark.integration
+    @pytest.mark.skipif(not LIVE_TESTS_ENABLED, reason="Set ENABLE_LIVE_TESTS=1 to run live checks")
     def test_real_website_accessible(self):
         """CRITICAL: Test that target website is accessible"""
         parser = Parser()
@@ -130,6 +136,7 @@ class TestParserLiveConnection:
         assert "product-card" in content or "html" in content.lower(), "Website structure may have changed!"
     
     @pytest.mark.integration
+    @pytest.mark.skipif(not LIVE_TESTS_ENABLED, reason="Set ENABLE_LIVE_TESTS=1 to run live checks")
     def test_real_website_parsing(self):
         """CRITICAL: Test parsing real website data"""
         parser = Parser()
@@ -147,4 +154,5 @@ class TestParserLiveConnection:
             assert hasattr(item, 'title'), "Item should have title"
             assert hasattr(item, 'price'), "Item should have price"
             assert hasattr(item, 'img_url'), "Item should have img_url"
-            assert item.url.startswith('https://coins.ay.by'), "Item URL should be from target domain"
+            # URL может быть как ay.by так и coins.ay.by
+            assert 'ay.by' in item.url, "Item URL should be from ay.by domain"
