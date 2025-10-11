@@ -81,7 +81,7 @@ class Monitor:
 
         if tracking_label:
             tracking = escape(tracking_label)
-            lines.append(f"Tracking: <b>{tracking}</b>")
+            lines.append(f"Отслеживаемая страница: <b>{tracking}</b>")
 
         lines.append(f"Цена: {price}")
         lines.append(f"🔗 <a href=\"{url}\">{url}</a>")
