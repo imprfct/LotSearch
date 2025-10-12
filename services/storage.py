@@ -4,7 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, Sequence
-from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 from urllib.parse import unquote
 
 from config import settings
@@ -158,16 +158,34 @@ def _build_label(url: str, existing_labels: set[str]) -> str:
 
 def _apply_order_to_url(url: str, order: str | None) -> str:
     parsed = urlparse(url)
-    query_pairs = [
-        (key, value)
-        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if key != "order"
-    ]
+    raw_query = parsed.query
+
+    if not raw_query:
+        if not order:
+            return url
+        assert order is not None
+        encoded = quote_plus(order)
+        return urlunparse(parsed._replace(query=f"order={encoded}"))
+
+    segments = raw_query.split("&")
+    preserved: list[str] = []
+
+    for segment in segments:
+        if not segment:
+            preserved.append(segment)
+            continue
+
+        key, _, _ = segment.partition("=")
+        if key == "order":
+            continue
+        preserved.append(segment)
 
     if order:
-        query_pairs.append(("order", order))
+        assert order is not None
+        encoded = quote_plus(order)
+        preserved.append(f"order={encoded}")
 
-    new_query = urlencode(query_pairs, doseq=True)
+    new_query = "&".join(preserved)
     return urlunparse(parsed._replace(query=new_query))
 
 

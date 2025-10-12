@@ -91,6 +91,21 @@ def test_tracked_page_repository_update_sort(temp_db):
         repository.update_sort(page.id, "unknown-sort")
 
 
+def test_update_sort_preserves_existing_query_parameters(temp_db):
+    repository = TrackedPageRepository()
+    page = repository.add_page(
+        "https://example.com/catalog?f=1&ti1=6",
+        "Каталог",
+    )
+    assert page.id is not None
+
+    sorted_page = repository.update_sort(page.id, "create")
+    assert sorted_page.url == "https://example.com/catalog?f=1&ti1=6&order=create"
+
+    reverted_page = repository.update_sort(page.id, None)
+    assert reverted_page.url == "https://example.com/catalog?f=1&ti1=6"
+
+
 def test_item_repository_get_recent_items(temp_db):
     item_repository = ItemRepository()
     source_url = "https://example.com/list"
