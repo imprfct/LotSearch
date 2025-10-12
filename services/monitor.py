@@ -16,6 +16,42 @@ from services.storage import ItemRepository, TrackedPageRepository
 logger = logging.getLogger(__name__)
 
 
+def _build_notification_caption(
+    item: Item,
+    tracking_label: str | None,
+    tracking_url: str | None,
+) -> str:
+    title = escape(item.title)
+    url = escape(item.url, quote=True)
+    raw_price = (item.price or "").strip()
+    has_price = raw_price and raw_price.casefold() != "цена не указана"
+    price_value = escape(raw_price) if has_price else "Цена не указана"
+    price_line = f"💰 <b>{price_value}</b>" if has_price else "💰 <i>Цена не указана</i>"
+
+    lines = [
+        "🔥 <b>Новый лот!</b>",
+        f"<b>{title}</b>",
+    ]
+
+    if tracking_label:
+        tracking = escape(tracking_label)
+        if tracking_url:
+            url_ref = escape(tracking_url, quote=True)
+            lines.append(f"📰 Страница: <a href=\"{url_ref}\"><b>{tracking}</b></a>")
+        else:
+            lines.append(f"📰 Страница: <b>{tracking}</b>")
+
+    lines.extend(
+        [
+            "",
+            price_line,
+            f"🔗 <a href=\"{url}\">Перейти к лоту</a>",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
 class Monitor:
     """Monitor for checking new items on websites."""
 
@@ -65,7 +101,7 @@ class Monitor:
         new_items = [item for item in current_items if item.url not in known_urls]
 
         for item in new_items:
-            await self._send_notification(item, tracking_label)
+            await self._send_notification(item, tracking_label, url)
 
         notified = len(new_items)
 
@@ -73,20 +109,14 @@ class Monitor:
         logger.info("Found %s new items at %s", len(new_items), url)
         logger.info("Sent %s notifications for %s", notified, url)
     
-    async def _send_notification(self, item: Item, tracking_label: str | None = None) -> None:
+    async def _send_notification(
+        self,
+        item: Item,
+        tracking_label: str | None = None,
+        tracking_url: str | None = None,
+    ) -> None:
         """Send notification about new item to all admins."""
-        title = escape(item.title)
-        price = escape(str(item.price))
-        url = escape(item.url, quote=True)
-        lines = [f"🆕 <b>{title}</b>"]
-
-        if tracking_label:
-            tracking = escape(tracking_label)
-            lines.append(f"Отслеживаемая страница: <b>{tracking}</b>")
-
-        lines.append(f"Цена: {price}")
-        lines.append(f"🔗 <a href=\"{url}\">{url}</a>")
-        caption = "\n".join(lines)
+        caption = _build_notification_caption(item, tracking_label, tracking_url)
 
         media_urls = list(getattr(item, "image_urls", ()) or ())
         if not media_urls and item.img_url:
