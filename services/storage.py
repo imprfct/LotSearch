@@ -4,6 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, Sequence
+import json
 from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 from urllib.parse import unquote
 
@@ -27,6 +28,7 @@ class ItemRepository:
                     title TEXT NOT NULL,
                     price TEXT NOT NULL,
                     img_url TEXT NOT NULL,
+                    gallery TEXT NOT NULL DEFAULT '[]',
                     source_url TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
@@ -35,6 +37,16 @@ class ItemRepository:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_items_source_url ON items(source_url)"
             )
+            self._ensure_gallery_column(connection)
+
+    @staticmethod
+    def _ensure_gallery_column(connection: sqlite3.Connection) -> None:
+        columns = connection.execute("PRAGMA table_info(items)").fetchall()
+        has_gallery = any(col[1] == "gallery" for col in columns)
+        if not has_gallery:
+            connection.execute("ALTER TABLE items ADD COLUMN gallery TEXT NOT NULL DEFAULT '[]'")
+            connection.execute("UPDATE items SET gallery = '[]' WHERE gallery IS NULL")
+            connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
@@ -57,7 +69,7 @@ class ItemRepository:
 
         query = (
             """
-            SELECT id, url, title, price, img_url, created_at
+            SELECT id, url, title, price, img_url, gallery, created_at
             FROM items
             WHERE source_url = ?
             ORDER BY datetime(created_at) DESC, id DESC
@@ -74,15 +86,28 @@ class ItemRepository:
 
         recent: list[tuple[Item, datetime | None]] = []
         for row in rows:
-            created_at = row[5]
+            gallery_raw = row[5]
+            created_at = row[6]
             saved_at: datetime | None
             try:
                 saved_at = datetime.fromisoformat(created_at) if created_at else None
             except ValueError:
                 saved_at = None
+            try:
+                gallery_list = json.loads(gallery_raw) if gallery_raw else []
+            except json.JSONDecodeError:
+                gallery_list = []
+            if not gallery_list:
+                gallery_list = [row[4]] if row[4] else []
             recent.append(
                 (
-                    Item(url=row[1], title=row[2], price=row[3], img_url=row[4]),
+                    Item(
+                        url=row[1],
+                        title=row[2],
+                        price=row[3],
+                        img_url=row[4],
+                        image_urls=tuple(gallery_list),
+                    ),
                     saved_at,
                 )
             )
@@ -96,6 +121,7 @@ class ItemRepository:
                 item.title,
                 item.price,
                 item.img_url,
+                json.dumps(list(item.image_urls) or ([item.img_url] if item.img_url else [])),
                 source_url,
                 timestamp,
             )
@@ -106,12 +132,13 @@ class ItemRepository:
         with self._connect() as connection:
             connection.executemany(
                 """
-                INSERT INTO items (url, title, price, img_url, source_url, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO items (url, title, price, img_url, gallery, source_url, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     title=excluded.title,
                     price=excluded.price,
                     img_url=excluded.img_url,
+                    gallery=excluded.gallery,
                     source_url=excluded.source_url
                 """,
                 records,

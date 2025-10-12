@@ -20,6 +20,7 @@ class TestItem:
         assert item.title == "Test Item"
         assert item.price == "100 BYN"
         assert item.img_url == "https://example.com/img.jpg"
+        assert item.image_urls == ("https://example.com/img.jpg",)
     
     def test_item_equality(self):
         """Test items with same URL are equal"""
@@ -45,3 +46,21 @@ class TestItem:
         
         # item1 and item2 have same URL, so set should have only 2 items
         assert len(items_set) == 2
+
+    def test_item_uses_provided_gallery(self):
+        item = Item(
+            url="https://example.com/item3",
+            title="Gallery Item",
+            price="150 BYN",
+            img_url="https://example.com/thumb.jpg",
+            image_urls=(
+                "https://example.com/full_1.jpg",
+                "https://example.com/full_2.jpg",
+            ),
+        )
+
+        assert item.img_url == "https://example.com/thumb.jpg"
+        assert item.image_urls == (
+            "https://example.com/full_1.jpg",
+            "https://example.com/full_2.jpg",
+        )

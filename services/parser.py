@@ -82,19 +82,24 @@ class Parser:
                 img_tag = card.find('img')
                 if not img_tag:
                     continue
-                img_url = img_tag.get('src', '').strip()
-                if img_url and not img_url.startswith('http'):
-                    img_url = urljoin(BASE_URL, img_url)
+                img_url = self._normalize_media_url(img_tag.get('data-src') or img_tag.get('src', ''), link)
                 if not img_url:
                     continue
 
                 price = self._extract_price(list(card.stripped_strings))
 
+                gallery_urls = self._load_item_gallery(link)
+                if gallery_urls:
+                    image_urls = gallery_urls
+                else:
+                    image_urls = [img_url]
+
                 item = Item(
                     url=link,
                     title=title,
                     price=price,
-                    img_url=img_url
+                    img_url=image_urls[0],
+                    image_urls=tuple(image_urls),
                 )
                 items.append(item)
             except Exception:
@@ -118,6 +123,56 @@ class Parser:
         if not match:
             return "Цена не указана"
         return " ".join(match.group(0).split())
+
+    @staticmethod
+    def _normalize_media_url(url: str, base_url: str | None = None) -> str:
+        candidate = (url or "").strip()
+        if not candidate:
+            return ""
+        if candidate.startswith("//"):
+            return f"https:{candidate}"
+        if candidate.startswith("http"):
+            return candidate
+        if candidate.startswith("/"):
+            return urljoin(BASE_URL, candidate)
+        return urljoin(base_url or BASE_URL, candidate)
+
+    def _load_item_gallery(self, item_url: str) -> List[str]:
+        try:
+            response = self.session.get(item_url, headers=self.headers, timeout=self.timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.debug("Failed to fetch item gallery for %s: %s", item_url, exc)
+            return []
+
+        return self._parse_gallery_images(response.text, item_url)
+
+    def _parse_gallery_images(self, html: str, base_url: str) -> List[str]:
+        soup = BeautifulSoup(html, 'html.parser')
+        urls: List[str] = []
+
+        for anchor in soup.select('figure.pswipe-gallery-element a[href]'):
+            href = anchor.get('href', '').strip()
+            normalized = self._normalize_media_url(href, base_url)
+            if normalized:
+                urls.append(normalized)
+
+        if not urls:
+            for img in soup.select('.b-lot-media__photo img, .lot-photo__item img, .b-lot-media__gallery img'):
+                candidate = img.get('data-origin') or img.get('data-src') or img.get('src')
+                normalized = self._normalize_media_url(candidate, base_url)
+                if normalized:
+                    urls.append(normalized)
+
+        unique: List[str] = []
+        seen = set()
+        for media_url in urls:
+            if media_url in seen:
+                continue
+            seen.add(media_url)
+            unique.append(media_url)
+
+        return unique
 
     def _create_session(self) -> Session:
         session = requests.Session()

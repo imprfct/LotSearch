@@ -2,6 +2,7 @@
 Data models for the application
 """
 from dataclasses import dataclass
+from typing import Tuple
 
 
 @dataclass(slots=True)
@@ -11,6 +12,15 @@ class Item:
     title: str
     price: str
     img_url: str
+    image_urls: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.image_urls, tuple):
+            object.__setattr__(self, "image_urls", tuple(self.image_urls))
+        if self.image_urls and not self.img_url:
+            object.__setattr__(self, "img_url", self.image_urls[0])
+        elif self.img_url and not self.image_urls:
+            object.__setattr__(self, "image_urls", (self.img_url,))
     
     def __hash__(self):
         """Make Item hashable by URL"""

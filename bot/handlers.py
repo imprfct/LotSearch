@@ -47,7 +47,11 @@ _settings_message_refs: Dict[int, Tuple[int, int]] = {}
 class LatestPreview:
     caption: str
     keyboard: InlineKeyboardMarkup
-    photo_url: str | None
+    image_urls: tuple[str, ...]
+
+
+_latest_gallery_messages: Dict[tuple[int, int], list[int]] = {}
+MAX_MEDIA_GROUP_SIZE = 10
 
 FILTER_OPTIONS = (
     ("all", "Все"),
@@ -417,54 +421,75 @@ def _build_latest_keyboard(page_id: int, index: int, total: int) -> InlineKeyboa
     return builder.as_markup()
 
 
+async def _send_gallery(
+    bot,
+    chat_id: int,
+    image_urls: Sequence[str],
+    caption: str | None,
+) -> list[int]:
+    media_ids: list[int] = []
+    urls = list(image_urls)[:MAX_MEDIA_GROUP_SIZE]
+    if not urls:
+        return media_ids
+
+    if len(urls) == 1:
+        kwargs = {"chat_id": chat_id, "photo": urls[0]}
+        if caption:
+            kwargs.update({"caption": caption, "parse_mode": 'HTML'})
+        msg = await bot.send_photo(**kwargs)
+        media_ids.append(msg.message_id)
+        return media_ids
+
+    media_group = []
+    for index, url in enumerate(urls):
+        if index == 0 and caption:
+            media_group.append(InputMediaPhoto(media=url, caption=caption, parse_mode='HTML'))
+        else:
+            media_group.append(InputMediaPhoto(media=url))
+    messages = await bot.send_media_group(chat_id=chat_id, media=media_group)
+    media_ids.extend(message.message_id for message in messages)
+    return media_ids
+
+
+def _note_for_gallery(count: int) -> str:
+    if count <= 0:
+        return ""
+    if count == 1:
+        return "\n\n🖼 Фото отправлено выше."
+    return f"\n\n📸 Галерея из {count} фото отправлена выше."
+
+
+async def _clear_gallery(bot, chat_id: int, anchor_message_id: int) -> None:
+    key = (chat_id, anchor_message_id)
+    message_ids = _latest_gallery_messages.pop(key, [])
+    for mid in message_ids:
+        try:
+            await bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
+
 async def _send_latest_preview_message(bot, chat_id: int, preview: LatestPreview):
-    if preview.photo_url:
-        return await bot.send_photo(
-            chat_id=chat_id,
-            photo=preview.photo_url,
-            caption=preview.caption,
-            parse_mode='HTML',
-            reply_markup=preview.keyboard,
-        )
-    return await bot.send_message(
+    gallery_ids = await _send_gallery(bot, chat_id, preview.image_urls, caption=None)
+    note = _note_for_gallery(len(preview.image_urls))
+    message = await bot.send_message(
         chat_id=chat_id,
-        text=preview.caption,
+        text=f"{preview.caption}{note}",
         parse_mode='HTML',
         reply_markup=preview.keyboard,
         disable_web_page_preview=True,
     )
+    if gallery_ids:
+        _latest_gallery_messages[(message.chat.id, message.message_id)] = gallery_ids
+    return message
 
 
 async def _update_latest_preview_message(bot, message: Message, preview: LatestPreview):
-    has_photo = bool(message.photo)
-
-    try:
-        if has_photo and preview.photo_url:
-            await message.edit_media(
-                InputMediaPhoto(
-                    media=preview.photo_url,
-                    caption=preview.caption,
-                    parse_mode='HTML',
-                ),
-                reply_markup=preview.keyboard,
-            )
-            return message
-        if not has_photo and not preview.photo_url:
-            await message.edit_text(
-                preview.caption,
-                parse_mode='HTML',
-                reply_markup=preview.keyboard,
-                disable_web_page_preview=True,
-            )
-            return message
-    except Exception as exc:
-        logger.debug("Failed to edit latest preview message directly: %s", exc)
-
+    await _clear_gallery(bot, message.chat.id, message.message_id)
     try:
         await message.delete()
     except Exception:
         pass
-
     return await _send_latest_preview_message(bot, message.chat.id, preview)
 
 
@@ -501,8 +526,8 @@ def _compose_latest_preview(
 
     text = "\n".join(parts)
     keyboard = _build_latest_keyboard(page.id, index, total)
-    photo_url = item.img_url or None
-    return LatestPreview(caption=text, keyboard=keyboard, photo_url=photo_url)
+    images = item.image_urls if getattr(item, "image_urls", None) else (() if not item.img_url else (item.img_url,))
+    return LatestPreview(caption=text, keyboard=keyboard, image_urls=images)
 
 
 def _compose_tracking_overview(
@@ -1114,6 +1139,7 @@ async def tracking_callback(call: CallbackQuery) -> None:
                     await message.delete()
                 except Exception:
                     pass
+                await _clear_gallery(bot, message.chat.id, message.message_id)
             await call.answer()
             return
         elif action == "noop":

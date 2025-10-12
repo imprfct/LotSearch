@@ -20,14 +20,25 @@ class TestParser:
     def test_parse_items_from_valid_html(self, sample_html):
         """Test parsing items from valid HTML"""
         parser = Parser()
-        items = parser.parse_items(sample_html)
+        with patch.object(Parser, '_load_item_gallery', side_effect=[
+            ["https://example.com/full1a.jpg", "https://example.com/full1b.jpg"],
+            [],
+        ]):
+            items = parser.parse_items(sample_html)
         
         assert len(items) == 2
         assert items[0].title == "Test Item 1"
         assert items[0].price == "100,00 бел. руб."
         assert items[0].url == "https://ay.by/lot/item1"
+        assert items[0].img_url == "https://example.com/full1a.jpg"
+        assert items[0].image_urls == (
+            "https://example.com/full1a.jpg",
+            "https://example.com/full1b.jpg",
+        )
         assert items[1].title == "Test Item 2"
         assert items[1].price == "200,50 бел. руб."
+        assert items[1].img_url == "https://example.com/img2.jpg"
+        assert items[1].image_urls == ("https://example.com/img2.jpg",)
     
     def test_parse_items_from_empty_html(self, invalid_html):
         """Test parsing from HTML without products"""
@@ -51,7 +62,8 @@ class TestParser:
         </div>
         """
         parser = Parser()
-        items = parser.parse_items(html)
+        with patch.object(Parser, '_load_item_gallery', return_value=[]):
+            items = parser.parse_items(html)
         
         # Should only parse the complete card
         assert len(items) == 1
@@ -184,5 +196,6 @@ class TestParserLiveConnection:
             assert hasattr(item, 'title'), "Item should have title"
             assert hasattr(item, 'price'), "Item should have price"
             assert hasattr(item, 'img_url'), "Item should have img_url"
+            assert hasattr(item, 'image_urls'), "Item should have image_urls"
             # URL может быть как ay.by так и coins.ay.by
             assert 'ay.by' in item.url, "Item URL should be from ay.by domain"

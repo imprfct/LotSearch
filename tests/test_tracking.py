@@ -127,7 +127,11 @@ def test_item_repository_get_recent_items(temp_db):
             url=f"https://example.com/lot{i}",
             title=f"Lot {i}",
             price=f"{i * 10}",
-            img_url=f"https://example.com/img{i}",
+            img_url=f"https://example.com/thumb{i}",
+            image_urls=(
+                f"https://example.com/full{i}_1",
+                f"https://example.com/full{i}_2",
+            ),
         )
         for i in range(6, 18)
     ]
@@ -140,10 +144,16 @@ def test_item_repository_get_recent_items(temp_db):
     first_item, saved_at = recent_all[0]
     assert first_item.url == new_batch[-1].url
     assert saved_at is not None
+    assert first_item.img_url == new_batch[-1].img_url
+    assert first_item.image_urls == new_batch[-1].image_urls
 
     limited = item_repository.get_recent_items(source_url, limit=5)
     assert len(limited) == 5
     assert limited[0][0].url == new_batch[-1].url
+    assert limited[0][0].image_urls == new_batch[-1].image_urls
 
     empty_limited = item_repository.get_recent_items(source_url, limit=0)
     assert empty_limited == []
+
+    legacy_item = recent_all[-1][0]
+    assert legacy_item.image_urls == (legacy_item.img_url,)

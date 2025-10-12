@@ -99,8 +99,39 @@ async def test_monitor_send_notification_includes_tracking_label(temp_db):
     await monitor._send_notification(item, tracking_label)
 
     assert bot.send_photo.await_count == len(settings.ADMIN_CHAT_IDS)
+    assert bot.send_media_group.await_count == 0
     assert bot.send_message.await_count == 0
 
     for call in bot.send_photo.await_args_list:
         kwargs = call.kwargs
-        assert "Tracking: <b>Coins Tracking</b>" in kwargs["caption"]
+        assert "Отслеживаемая страница: <b>Coins Tracking</b>" in kwargs["caption"]
+
+
+@pytest.mark.asyncio
+async def test_monitor_sends_album_when_multiple_images(temp_db):
+    bot = AsyncMock()
+    monitor = Monitor(bot)
+
+    item = Item(
+        url="https://example.com/lot11",
+        title="Lot 11",
+        price="1100",
+        img_url="https://example.com/thumb11",
+        image_urls=(
+            "https://example.com/full11a",
+            "https://example.com/full11b",
+            "https://example.com/full11c",
+        ),
+    )
+
+    await monitor._send_notification(item, None)
+
+    assert bot.send_media_group.await_count == len(settings.ADMIN_CHAT_IDS)
+    assert bot.send_photo.await_count == 0
+    assert bot.send_message.await_count == 0
+
+    for call in bot.send_media_group.await_args_list:
+        kwargs = call.kwargs
+        media = kwargs["media"]
+        assert len(media) == len(item.image_urls)
+        assert media[0].caption and "Lot 11" in media[0].caption

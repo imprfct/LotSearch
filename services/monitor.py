@@ -6,6 +6,7 @@ import logging
 from html import escape
 
 from aiogram import Bot
+from aiogram.types import InputMediaPhoto
 
 from config import settings
 from models import Item
@@ -87,12 +88,33 @@ class Monitor:
         lines.append(f"🔗 <a href=\"{url}\">{url}</a>")
         caption = "\n".join(lines)
 
+        media_urls = list(getattr(item, "image_urls", ()) or ())
+        if not media_urls and item.img_url:
+            media_urls = [item.img_url]
+
         for chat_id in settings.ADMIN_CHAT_IDS:
             try:
-                if item.img_url:
+                if len(media_urls) > 1:
+                    media_group = []
+                    for index, media_url in enumerate(media_urls[:10]):
+                        if index == 0:
+                            media_group.append(
+                                InputMediaPhoto(
+                                    media=media_url,
+                                    caption=caption,
+                                    parse_mode='HTML',
+                                )
+                            )
+                        else:
+                            media_group.append(InputMediaPhoto(media=media_url))
+                    await self.bot.send_media_group(
+                        chat_id=chat_id,
+                        media=media_group,
+                    )
+                elif media_urls:
                     await self.bot.send_photo(
                         chat_id=chat_id,
-                        photo=item.img_url,
+                        photo=media_urls[0],
                         caption=caption,
                         parse_mode='HTML'
                     )
