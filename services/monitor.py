@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from html import escape
+import re
+from html import escape, unescape
 
 from aiogram import Bot
 from aiogram.types import InputMediaPhoto
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 
 from config import settings
 from models import Item
@@ -60,6 +66,7 @@ class Monitor:
         self.parser = Parser()
         self.repository = ItemRepository()
         self.tracked_pages = TrackedPageRepository()
+        self._chat_locks: dict[int, asyncio.Lock] = {}
     
     async def check_new_items(self) -> None:
         """Check all monitored URLs for new items and send notifications."""
@@ -118,42 +125,104 @@ class Monitor:
         """Send notification about new item to all admins."""
         caption = _build_notification_caption(item, tracking_label, tracking_url)
 
-        media_urls = list(getattr(item, "image_urls", ()) or ())
+        raw_urls = getattr(item, "image_urls", None) or ()
+        media_urls: list[str] = [url for url in raw_urls if url]
         if not media_urls and item.img_url:
             media_urls = [item.img_url]
 
         for chat_id in settings.ADMIN_CHAT_IDS:
+            lock = self._chat_locks.get(chat_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._chat_locks[chat_id] = lock
+            async with lock:
+                await self._deliver_notification(chat_id, item, media_urls, caption)
+                await asyncio.sleep(1.0 if len(media_urls) > 1 else 0.5)
+
+    async def _deliver_notification(
+        self,
+        chat_id: int,
+        item: Item,
+        media_urls: list[str],
+        caption: str,
+    ) -> None:
+        attempts = 0
+        parse_mode: str | None = "HTML"
+        fallback_applied = False
+        while attempts < 5:
+            attempts += 1
             try:
-                if len(media_urls) > 1:
-                    media_group = []
-                    for index, media_url in enumerate(media_urls[:10]):
-                        if index == 0:
-                            media_group.append(
-                                InputMediaPhoto(
-                                    media=media_url,
-                                    caption=caption,
-                                    parse_mode='HTML',
-                                )
-                            )
-                        else:
-                            media_group.append(InputMediaPhoto(media=media_url))
-                    await self.bot.send_media_group(
-                        chat_id=chat_id,
-                        media=media_group,
-                    )
-                elif media_urls:
-                    await self.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=media_urls[0],
-                        caption=caption,
-                        parse_mode='HTML'
-                    )
-                else:
-                    await self.bot.send_message(
-                        chat_id=chat_id,
-                        text=caption,
-                        parse_mode='HTML'
-                    )
+                await self._send_to_chat(chat_id, media_urls, caption, parse_mode)
                 logger.info("Notification sent to %s for: %s", chat_id, item.title)
+                return
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(exc.retry_after + 1)
+            except TelegramForbiddenError:
+                logger.warning("Skipping chat %s: bot blocked or chat inaccessible", chat_id)
+                return
+            except TelegramBadRequest as exc:
+                message = exc.message.lower() if exc.message else ""
+                if "chat not found" in message:
+                    logger.warning("Skipping chat %s: chat not found", chat_id)
+                    return
+                if "can't parse entities" in message and not fallback_applied:
+                    caption = _strip_html(caption)
+                    parse_mode = None
+                    fallback_applied = True
+                    continue
+                logger.warning("Bad request when sending to %s: %s", chat_id, exc)
+                return
             except Exception:
                 logger.exception("Error sending notification to %s for %s", chat_id, item.title)
+                return
+        logger.error("Failed to send notification to %s for %s after retries", chat_id, item.title)
+
+    async def _send_to_chat(
+        self,
+        chat_id: int,
+        media_urls: list[str],
+        caption: str,
+        parse_mode: str | None,
+    ) -> None:
+        if len(media_urls) > 1:
+            media_group = []
+            for index, media_url in enumerate(media_urls[:10]):
+                if index == 0:
+                    media_group.append(
+                        InputMediaPhoto(
+                            media=media_url,
+                            caption=caption,
+                            parse_mode=parse_mode,
+                        )
+                    )
+                else:
+                    media_group.append(InputMediaPhoto(media=media_url))
+            await self.bot.send_media_group(
+                chat_id=chat_id,
+                media=media_group,
+            )
+            return
+
+        kwargs = {}
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
+
+        if media_urls:
+            await self.bot.send_photo(
+                chat_id=chat_id,
+                photo=media_urls[0],
+                caption=caption,
+                **kwargs,
+            )
+            return
+
+        await self.bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            **kwargs,
+        )
+
+
+def _strip_html(value: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", "", value)
+    return unescape(without_tags)
