@@ -51,6 +51,18 @@ class LatestPreview:
 
 
 _latest_gallery_messages: Dict[tuple[int, int], list[int]] = {}
+ 
+
+@dataclass(slots=True)
+class NewsDraft:
+    text: str | None = None
+    prompt_message_id: int | None = None
+    prompt_chat_id: int | None = None
+    preview_message_id: int | None = None
+    preview_chat_id: int | None = None
+
+
+_news_drafts: Dict[int, NewsDraft] = {}
 MAX_MEDIA_GROUP_SIZE = 10
 
 FILTER_OPTIONS = (
@@ -69,6 +81,107 @@ SORT_OPTIONS = (
 )
 
 SORT_LABEL_MAP = {key or "": label for key, label in SORT_OPTIONS}
+
+
+async def _delete_message_safe(bot, chat_id: int | None, message_id: int | None) -> None:
+    if chat_id is None or message_id is None:
+        return
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+
+def _ensure_news_draft(user_id: int) -> NewsDraft:
+    draft = _news_drafts.get(user_id)
+    if draft is None:
+        draft = NewsDraft()
+        _news_drafts[user_id] = draft
+    return draft
+
+
+async def _purge_news_draft(bot, user_id: int) -> None:
+    draft = _news_drafts.pop(user_id, None)
+    if not draft:
+        return
+    await _delete_message_safe(bot, draft.prompt_chat_id, draft.prompt_message_id)
+    await _delete_message_safe(bot, draft.preview_chat_id, draft.preview_message_id)
+
+
+async def _clear_news_prompt(bot, draft: NewsDraft) -> None:
+    await _delete_message_safe(bot, draft.prompt_chat_id, draft.prompt_message_id)
+    draft.prompt_chat_id = None
+    draft.prompt_message_id = None
+
+
+async def _clear_news_preview(bot, draft: NewsDraft) -> None:
+    await _delete_message_safe(bot, draft.preview_chat_id, draft.preview_message_id)
+    draft.preview_chat_id = None
+    draft.preview_message_id = None
+
+
+def _build_news_preview_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✖️ Отмена", callback_data="news:cancel"),
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data="news:edit"),
+        InlineKeyboardButton(text="✅ Отправить", callback_data="news:send"),
+    )
+    return builder.as_markup()
+
+
+def _compose_news_preview_text(content: str) -> str:
+    return "📝 <b>Предпросмотр новости</b>\n\n" + content
+
+
+async def _ask_news_content(bot, user_id: int, chat_id: int, prompt_text: str) -> None:
+    draft = _ensure_news_draft(user_id)
+    await _clear_news_prompt(bot, draft)
+    prompt = await bot.send_message(
+        chat_id=chat_id,
+        text=prompt_text,
+        parse_mode='HTML',
+        reply_markup=ForceReply(selective=True),
+    )
+    draft.prompt_chat_id = prompt.chat.id
+    draft.prompt_message_id = prompt.message_id
+    _set_pending_action(
+        user_id,
+        PendingAction(
+            action_type="news_collect",
+            prompt_message_id=prompt.message_id,
+            prompt_chat_id=prompt.chat.id,
+        ),
+    )
+
+
+async def _show_news_preview(bot, user_id: int, chat_id: int) -> None:
+    draft = _news_drafts.get(user_id)
+    if not draft or not draft.text:
+        return
+    await _clear_news_preview(bot, draft)
+    message = await bot.send_message(
+        chat_id=chat_id,
+        text=_compose_news_preview_text(draft.text),
+        parse_mode='HTML',
+        reply_markup=_build_news_preview_keyboard(),
+        disable_web_page_preview=True,
+    )
+    draft.preview_chat_id = message.chat.id
+    draft.preview_message_id = message.message_id
+
+
+async def _broadcast_news(bot, chat_ids: Sequence[int], text: str) -> tuple[int, list[int]]:
+    delivered = 0
+    failed: list[int] = []
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+            delivered += 1
+        except Exception as exc:
+            failed.append(chat_id)
+            logger.warning("Failed to send news to %s: %r", chat_id, exc)
+    return delivered, failed
 
 
 def _plural_category(value: int) -> str:
@@ -779,6 +892,27 @@ async def cmd_help(message: Message) -> None:
     await message.answer(help_text, parse_mode='HTML')
 
 
+@router.message(Command("news"), IsAdmin())
+async def cmd_news(message: Message) -> None:
+    user_id = _extract_user_id(message)
+    if user_id is None:
+        return
+
+    bot = message.bot
+    if bot is None:
+        return
+
+    await _cancel_pending_action(bot, user_id)
+    await _purge_news_draft(bot, user_id)
+
+    await _ask_news_content(
+        bot,
+        user_id,
+        message.chat.id,
+        "Введите текст новости, он будет отправлен всем администраторам.",
+    )
+
+
 @router.message(Command("settings"), IsAdmin())
 async def cmd_settings(message: Message) -> None:
     """Handle /settings command for administrators."""
@@ -950,6 +1084,65 @@ async def settings_callback(call: CallbackQuery) -> None:
         await call.answer("Неизвестное действие", show_alert=True)
     except ValueError as exc:
         await call.answer(str(exc), show_alert=True)
+
+
+@router.callback_query(IsAdmin(), F.data.startswith("news:"))
+async def news_callback(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else None
+    if user_id is None:
+        await call.answer("Пользователь неизвестен", show_alert=True)
+        return
+
+    message = call.message
+    if message is None:
+        await call.answer("Сообщение недоступно", show_alert=True)
+        return
+
+    bot = message.bot
+    if bot is None:
+        await call.answer()
+        return
+
+    parts = (call.data or "").split(":", 1)
+    action = parts[1] if len(parts) > 1 else ""
+    draft = _news_drafts.get(user_id)
+    chat_id = message.chat.id
+
+    if action == "cancel":
+        await _delete_message_safe(bot, chat_id, message.message_id)
+        await _purge_news_draft(bot, user_id)
+        _clear_pending_action(user_id)
+        await call.answer("Отменено")
+        await bot.send_message(chat_id=chat_id, text="Рассылка отменена.", parse_mode='HTML')
+        return
+
+    if draft is None or not draft.text:
+        await call.answer("Нет подготовленной новости", show_alert=True)
+        return
+
+    if action == "edit":
+        await _clear_news_preview(bot, draft)
+        draft.text = None
+        await _ask_news_content(bot, user_id, chat_id, "Введите новый текст новости.")
+        await call.answer("Жду текст")
+        return
+
+    if action == "send":
+        admins = app_settings.get_admin_ids()
+        if not admins:
+            await call.answer("Список администраторов пуст", show_alert=True)
+            return
+        await call.answer("Отправляю")
+        delivered, failed = await _broadcast_news(bot, admins, draft.text)
+        await _purge_news_draft(bot, user_id)
+        _clear_pending_action(user_id)
+        summary = f"Новость отправлена {delivered} из {len(admins)} администраторам."
+        if failed:
+            summary += f"\nНе доставлено: {len(failed)}."
+        await bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML')
+        return
+
+    await call.answer("Неизвестное действие", show_alert=True)
 
 
 @router.callback_query(IsAdmin(), F.data.startswith("tracking:"))
@@ -1223,6 +1416,15 @@ async def tracking_reply_handler(message: Message) -> None:
                 await bot.delete_message(message.chat.id, message.message_id)
             except Exception:
                 pass
+        return
+
+    if action_type == "news_collect":
+        draft = _ensure_news_draft(user_id)
+        draft.text = text
+        await _clear_news_prompt(bot, draft)
+        await _delete_message_safe(bot, message.chat.id, message.message_id)
+        _clear_pending_action(user_id)
+        await _show_news_preview(bot, user_id, message.chat.id)
         return
 
     repository = TrackedPageRepository()
