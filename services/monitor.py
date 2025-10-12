@@ -37,6 +37,7 @@ def _build_notification_caption(
     lines = [
         "🔥 <b>Новый лот!</b>",
         f"<b>{title}</b>",
+        "",
     ]
 
     if tracking_label:
@@ -46,12 +47,13 @@ def _build_notification_caption(
             lines.append(f"📰 Страница: <a href=\"{url_ref}\"><b>{tracking}</b></a>")
         else:
             lines.append(f"📰 Страница: <b>{tracking}</b>")
+        lines.append("")
 
     lines.extend(
         [
-            "",
             price_line,
-            f"🔗 <a href=\"{url}\">Перейти к лоту</a>",
+            "",
+            f"🌐 <a href=\"{url}\">Перейти к лоту</a>",
         ]
     )
 
