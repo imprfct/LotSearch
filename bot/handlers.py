@@ -1499,17 +1499,10 @@ async def cmd_resend_missed_coins(message: Message) -> None:
     
     sent_count = 0
     error_count = 0
-    already_known = 0
     
     for url in urls:
         try:
-            # Check if already in database
-            known_urls = item_repository.get_known_urls()
-            if url in known_urls:
-                already_known += 1
-                continue
-            
-            # Fetch item details
+            # Fetch item details (forced resend - skip database check)
             html = parser.get_page_content(url)
             if not html:
                 logger.warning("Failed to fetch %s", url)
@@ -1571,7 +1564,6 @@ async def cmd_resend_missed_coins(message: Message) -> None:
     summary = (
         f"✅ Завершено!\n\n"
         f"📤 Отправлено: {sent_count}\n"
-        f"⏭️ Уже были: {already_known}\n"
         f"❌ Ошибок: {error_count}\n"
         f"📊 Всего: {len(urls)}"
     )
