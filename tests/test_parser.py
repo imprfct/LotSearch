@@ -68,6 +68,24 @@ class TestParser:
         # Should only parse the complete card
         assert len(items) == 1
         assert items[0].title == "Item 2"
+
+    def test_parse_items_uses_base_url_for_relative_links(self):
+        """Parser should join relative item URLs with provided base."""
+        html = """
+        <div class="item-type-card__card">
+            <a class="item-type-card__link" href="/lot/item3">Item 3</a>
+            <img src="/img3.jpg" />
+            <span>300,00</span>
+            <span>бел. руб.</span>
+        </div>
+        """
+        parser = Parser()
+        with patch.object(Parser, '_load_item_gallery', return_value=[]):
+            items = parser.parse_items(html, base_url="https://coins.ay.by/catalog/")
+
+        assert len(items) == 1
+        assert items[0].url == "https://coins.ay.by/lot/item3"
+        assert items[0].img_url.startswith("https://coins.ay.by")
     
     @patch('services.parser.requests.get')
     def test_get_page_content_success(self, mock_get):
@@ -75,6 +93,7 @@ class TestParser:
         mock_response = Mock()
         mock_response.text = "<html>test</html>"
         mock_response.raise_for_status = Mock()
+        mock_response.url = "https://example.com"
         mock_get.return_value = mock_response
         
         session = Mock()
@@ -148,7 +167,7 @@ class TestParser:
         assert len(items) == 1
         assert items[0].title == "Item 1"
         mock_get.assert_called_once_with("https://example.com")
-        mock_parse.assert_called_once_with("<html>test</html>")
+        mock_parse.assert_called_once_with("<html>test</html>", base_url="https://example.com")
     
     @patch.object(Parser, 'get_page_content')
     def test_get_items_from_url_when_page_fails(self, mock_get):

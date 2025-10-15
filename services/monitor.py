@@ -18,6 +18,7 @@ from config import settings
 from models import Item
 from services.parser import Parser
 from services.storage import ItemRepository, TrackedPageRepository
+from services.alerts import send_critical_alert
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +79,16 @@ class Monitor:
         for page in pages:
             try:
                 await self._check_url(page.url, page.label)
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error checking URL %s", page.url)
+                error_msg = (
+                    f"⚠️ Критическая ошибка при проверке страницы!\n\n"
+                    f"URL: {page.url}\n"
+                    f"Метка: {page.label or 'Нет'}\n"
+                    f"Ошибка: {exc}\n\n"
+                    f"Проверка провалена, монеты могли быть упущены!"
+                )
+                await send_critical_alert(self.bot, settings.ADMIN_CHAT_IDS, error_msg, tag_user="@imprfctone")
     
     async def _check_url(self, url: str, tracking_label: str | None = None) -> None:
         """Check a specific URL for new items."""
@@ -88,13 +97,40 @@ class Monitor:
         loop = asyncio.get_running_loop()
         current_items = await loop.run_in_executor(None, self.parser.get_items_from_url, url)
 
-        if self.parser.last_error is not None:
-            logger.warning("Skipping %s due to fetch error: %s", url, self.parser.last_error)
+        if self.parser.last_page_load_failed:
+            error_msg = (
+                f"⚠️ Не удалось загрузить страницу мониторинга!\n\n"
+                f"URL: {url}\n"
+                f"Ошибка: {self.parser.last_error}\n\n"
+                f"Проверка пропущена, монеты могли быть упущены!"
+            )
+            await send_critical_alert(self.bot, settings.ADMIN_CHAT_IDS, error_msg, tag_user="@imprfctone")
+            logger.warning("Skipping %s due to page fetch error: %s", url, self.parser.last_error)
             return
 
         if not current_items:
             logger.warning("No items found at %s", url)
             return
+
+        # Check for gallery load errors after all retries exhausted
+        if self.parser.gallery_load_errors:
+            error_details = "\n".join(
+                f"- {item_url}: {exc}" 
+                for item_url, exc in self.parser.gallery_load_errors[:5]
+            )
+            if len(self.parser.gallery_load_errors) > 5:
+                error_details += f"\n... и ещё {len(self.parser.gallery_load_errors) - 5}"
+            
+            error_msg = (
+                f"⚠️ Ошибки загрузки галерей после всех retry!\n\n"
+                f"Страница: {url}\n"
+                f"Метка: {tracking_label or 'Нет'}\n"
+                f"Ошибок: {len(self.parser.gallery_load_errors)}\n\n"
+                f"Детали:\n{error_details}\n\n"
+                f"⚠️ Монеты сохранены, но могут быть без полных галерей"
+            )
+            await send_critical_alert(self.bot, settings.ADMIN_CHAT_IDS, error_msg, tag_user="@imprfctone")
+
 
         known_urls = self.repository.get_known_urls(source_url=url)
 
@@ -173,11 +209,25 @@ class Monitor:
                     fallback_applied = True
                     continue
                 logger.warning("Bad request when sending to %s: %s", chat_id, exc)
+                await self._alert_notification_failure(chat_id, item, f"Telegram Bad Request: {exc}")
                 return
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error sending notification to %s for %s", chat_id, item.title)
+                await self._alert_notification_failure(chat_id, item, f"Неожиданная ошибка: {exc}")
                 return
         logger.error("Failed to send notification to %s for %s after retries", chat_id, item.title)
+        await self._alert_notification_failure(chat_id, item, "Исчерпаны все попытки отправки")
+    
+    async def _alert_notification_failure(self, chat_id: int, item: Item, reason: str) -> None:
+        """Send critical alert when notification delivery fails."""
+        error_msg = (
+            f"⚠️ Не удалось отправить уведомление о новой монете!\n\n"
+            f"Чат: {chat_id}\n"
+            f"Монета: {item.title}\n"
+            f"URL: {item.url}\n"
+            f"Причина: {reason}"
+        )
+        await send_critical_alert(self.bot, settings.ADMIN_CHAT_IDS, error_msg, tag_user="@imprfctone")
 
     async def _send_to_chat(
         self,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import requests
@@ -104,7 +104,7 @@ async def test_monitor_send_notification_includes_tracking_label(temp_db):
 
     for call in bot.send_photo.await_args_list:
         kwargs = call.kwargs
-        assert "Отслеживаемая страница: <b>Coins Tracking</b>" in kwargs["caption"]
+        assert "📰 Страница: <b>Coins Tracking</b>" in kwargs["caption"]
 
 
 @pytest.mark.asyncio
@@ -135,3 +135,63 @@ async def test_monitor_sends_album_when_multiple_images(temp_db):
         media = kwargs["media"]
         assert len(media) == len(item.image_urls)
         assert media[0].caption and "Lot 11" in media[0].caption
+
+
+@pytest.mark.asyncio
+async def test_monitor_continues_on_gallery_load_error(temp_db):
+    """Critical: Monitor should not skip entire check if gallery load fails for one item."""
+    bot = AsyncMock()
+    monitor = Monitor(bot)
+    
+    # Mock parser that fails on gallery load but successfully parses main page
+    with patch.object(monitor.parser, 'get_items_from_url') as mock_get_items:
+        # Simulate: main page loaded successfully, but gallery load failed for one item
+        mock_get_items.return_value = [
+            Item(url="https://example.com/lot1", title="Item 1", price="100", img_url="img1.jpg"),
+            Item(url="https://example.com/lot2", title="Item 2", price="200", img_url="img2.jpg"),
+        ]
+        # Simulate gallery load error (not main page error!)
+        monitor.parser.last_error = Exception("DNS error loading gallery")
+        monitor.parser.last_page_load_failed = False  # Main page loaded OK!
+        
+        await monitor._check_url("https://example.com/catalog")
+        
+        # Should NOT skip - items should be saved
+        saved_urls = monitor.repository.get_known_urls(source_url="https://example.com/catalog")
+        assert len(saved_urls) == 2
+        assert "https://example.com/lot1" in saved_urls
+        assert "https://example.com/lot2" in saved_urls
+
+
+@pytest.mark.asyncio
+async def test_monitor_alerts_on_gallery_errors(temp_db):
+    """Monitor should send critical alert when gallery loads fail after all retries."""
+    bot = AsyncMock()
+    monitor = Monitor(bot)
+    
+    with patch.object(monitor.parser, 'get_items_from_url') as mock_get_items:
+        # Simulate successful main page but gallery errors
+        mock_get_items.return_value = [
+            Item(url="https://example.com/lot1", title="Item 1", price="100", img_url="img1.jpg"),
+        ]
+        monitor.parser.last_page_load_failed = False
+        monitor.parser.gallery_load_errors = [
+            ("https://example.com/lot1", requests.ConnectionError("DNS failed after retries")),
+        ]
+        
+        with patch('services.monitor.send_critical_alert') as mock_alert:
+            await monitor._check_url("https://example.com/catalog", "Test Page")
+            
+            # Should save items
+            saved_urls = monitor.repository.get_known_urls(source_url="https://example.com/catalog")
+            assert len(saved_urls) == 1
+            
+            # Should send critical alert about gallery errors
+            mock_alert.assert_called_once()
+            call_args = mock_alert.call_args
+            message = call_args[0][2]  # Third positional argument is the message
+            tag_user = call_args[1].get('tag_user')
+            
+            assert 'галерей после всех retry' in message
+            assert 'DNS failed after retries' in message
+            assert tag_user == '@imprfctone'

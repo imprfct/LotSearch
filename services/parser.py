@@ -35,39 +35,51 @@ class Parser:
             if headers is not None and hasattr(headers, "update"):
                 headers.update(self.headers)
         self.last_error: Optional[Exception] = None
+        self.last_page_url: Optional[str] = None
+        self.last_page_load_failed: bool = False
+        self.gallery_load_errors: list[tuple[str, Exception]] = []
 
     def get_page_content(self, url: str) -> Optional[str]:
         """Fetch HTML content from an URL."""
         self.last_error = None
+        self.last_page_url = None
+        self.last_page_load_failed = False
         try:
             response = self.session.get(url, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
+            self.last_page_url = getattr(response, "url", url)
             return response.text
         except requests.Timeout as exc:
             self.last_error = exc
+            self.last_page_load_failed = True
             logger.warning("Timeout fetching page %s: %s", url, exc)
             return None
         except requests.ConnectionError as exc:
             self.last_error = exc
+            self.last_page_load_failed = True
             logger.warning("Connection error fetching page %s: %s", url, exc)
             logger.debug("Connection error details", exc_info=True)
             return None
         except requests.HTTPError as exc:
             self.last_error = exc
+            self.last_page_load_failed = True
             status_code = getattr(exc.response, "status_code", "unknown")
             logger.error("HTTP error fetching page %s (status %s)", url, status_code)
             logger.debug("HTTP error details", exc_info=True)
             return None
         except requests.RequestException as e:
             self.last_error = e
+            self.last_page_load_failed = True
             logger.error("Error fetching page %s: %s", url, e)
             logger.debug("Unhandled request exception", exc_info=True)
             return None
 
-    def parse_items(self, html: str) -> List[Item]:
+    def parse_items(self, html: str, base_url: Optional[str] = None) -> List[Item]:
         """Parse items from HTML content."""
         soup = BeautifulSoup(html, 'html.parser')
         items = []
+        base = base_url or BASE_URL
+        self.gallery_load_errors.clear()
 
         for card in soup.find_all('div', class_='item-type-card__card'):
             try:
@@ -76,7 +88,7 @@ class Parser:
                     continue
 
                 raw_link = link_tag.get('href', '')
-                link = raw_link if raw_link.startswith('http') else urljoin(BASE_URL, raw_link)
+                link = raw_link if raw_link.startswith('http') else urljoin(base, raw_link)
                 title = link_tag.get_text(strip=True)
 
                 img_tag = card.find('img')
@@ -114,7 +126,8 @@ class Parser:
         html = self.get_page_content(url)
         if not html:
             return []
-        return self.parse_items(html)
+        base_url = self.last_page_url or url
+        return self.parse_items(html, base_url=base_url)
 
     @staticmethod
     def _extract_price(text_nodes: List[str]) -> str:
@@ -134,7 +147,7 @@ class Parser:
         if candidate.startswith("http"):
             return candidate
         if candidate.startswith("/"):
-            return urljoin(BASE_URL, candidate)
+            return urljoin(base_url or BASE_URL, candidate)
         return urljoin(base_url or BASE_URL, candidate)
 
     def _load_item_gallery(self, item_url: str) -> List[str]:
@@ -143,6 +156,7 @@ class Parser:
             response.raise_for_status()
         except requests.RequestException as exc:
             logger.debug("Failed to fetch item gallery for %s: %s", item_url, exc)
+            self.gallery_load_errors.append((item_url, exc))
             return []
 
         return self._parse_gallery_images(response.text, item_url)

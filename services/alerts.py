@@ -14,6 +14,29 @@ from aiogram import Bot
 MAX_ALERT_LENGTH = 3500
 
 
+async def send_critical_alert(bot: Bot, admin_chat_ids: Sequence[int], message: str, tag_user: str | None = None) -> None:
+    """Send critical alert to all admins, optionally tagging a user.
+    
+    Args:
+        bot: Telegram bot instance
+        admin_chat_ids: List of admin chat IDs
+        message: Alert message to send
+        tag_user: Optional username to tag (e.g., "@imprfctone")
+    """
+    if not admin_chat_ids:
+        return
+    
+    full_message = f"🚨 <b>КРИТИЧЕСКИЙ АЛЕРТ</b>\n\n{message}"
+    if tag_user:
+        full_message += f"\n\n{tag_user}"
+    
+    for chat_id in admin_chat_ids:
+        try:
+            await bot.send_message(chat_id, full_message, parse_mode="HTML")
+        except Exception as exc:
+            sys.stderr.write(f"Failed to send critical alert to {chat_id}: {exc!r}\n")
+
+
 class AdminAlertHandler(logging.Handler):
     """Logging handler that forwards error messages to Telegram admins."""
 
@@ -89,4 +112,4 @@ class AdminAlertHandler(logging.Handler):
             asyncio.run(coroutine)
 
 
-__all__ = ["AdminAlertHandler", "MAX_ALERT_LENGTH"]
+__all__ = ["AdminAlertHandler", "MAX_ALERT_LENGTH", "send_critical_alert"]
