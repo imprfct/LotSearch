@@ -121,6 +121,117 @@ class Parser:
         logger.info("Parsed %s items", len(items))
         return items
 
+    def parse_single_item_page(self, html: str, item_url: str) -> Optional[Item]:
+        """Parse a single item from its dedicated page."""
+        from bs4 import BeautifulSoup
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        try:
+            # Find title - try multiple selectors
+            title_tag = (
+                soup.select_one('h1.b-lot-page__title') or
+                soup.select_one('h1') or
+                soup.select_one('.lot-title')
+            )
+            if not title_tag:
+                logger.warning("No title found on %s", item_url)
+                return None
+            
+            title = title_tag.get_text(strip=True)
+            
+            # Find price - look for price containers
+            price = "Цена не указана"
+            
+            # Извлекаем только белорусские рубли
+            # Структура: <span class="b-lot-control__main">355,00&nbsp;<span class="b-lot-control__sub-main">бел. руб.</span>...</span>
+            price_main = soup.select_one('.b-lot-control__main')
+            if price_main:
+                # Валюта находится внутри price_main как вложенный span
+                currency_span = price_main.select_one('.b-lot-control__sub-main')
+                if currency_span:
+                    currency = currency_span.get_text(strip=True)
+                    # Проверяем, что это белорусские рубли
+                    if 'бел' in currency.lower():
+                        # Получаем только прямой текст (без вложенных тегов)
+                        # Используем .strings для получения только текстовых узлов
+                        price_parts = []
+                        for string in price_main.stripped_strings:
+                            # Пропускаем текст из вложенных элементов (валюты и справочной информации)
+                            if string != currency and 'справочно' not in string.lower() and '$' not in string and '€' not in string:
+                                price_parts.append(string)
+                        if price_parts:
+                            price_value = price_parts[0]  # Берём первую часть (сама цена)
+                            price = f"{price_value} {currency}"
+            
+            # Если не нашли, попробуем другие селекторы
+            if price == "Цена не указана":
+                price_selectors = [
+                    'span.b-lot-control__main',
+                    '.b-lot-control__main',
+                    '.b-lot-page__price-value',
+                    '.lot-price',
+                    '.price-value',
+                    '[class*="price"]'
+                ]
+                for selector in price_selectors:
+                    price_tag = soup.select_one(selector)
+                    if price_tag:
+                        price_text = price_tag.get_text(strip=True)
+                        # Ищем валюту как следующий элемент (sibling)
+                        parent = price_tag.parent
+                        if parent:
+                            sub_main = parent.select_one('.b-lot-control__sub-main')
+                            if sub_main:
+                                currency = sub_main.get_text(strip=True)
+                                # Берём только белорусские рубли
+                                if 'бел' in currency.lower() or 'руб' in currency.lower():
+                                    price_text = f"{price_text} {currency}"
+                                    if price_text and price_text.lower() != "цена не указана":
+                                        price = price_text
+                                        break
+                        elif price_text and price_text.lower() != "цена не указана":
+                            price = price_text
+                            break
+            
+            # Get gallery images
+            gallery_urls = self._parse_gallery_images(html, item_url)
+            
+            # If no gallery, try to find main image
+            if not gallery_urls:
+                img_selectors = [
+                    '.b-lot-media__photo img',
+                    '.lot-photo img',
+                    '.b-lot-page img[src*="/lot/"]',
+                    'img[data-src]',
+                ]
+                for selector in img_selectors:
+                    img_tag = soup.select_one(selector)
+                    if img_tag:
+                        img_src = img_tag.get('data-src') or img_tag.get('src') or ''
+                        img_url = self._normalize_media_url(img_src, item_url)
+                        if img_url:
+                            gallery_urls = [img_url]
+                            break
+            
+            if not gallery_urls:
+                logger.warning("No images found on %s", item_url)
+                return None
+            
+            item = Item(
+                url=item_url,
+                title=title,
+                price=price,
+                img_url=gallery_urls[0],
+                image_urls=tuple(gallery_urls),
+            )
+            
+            return item
+            
+        except Exception:
+            logger.exception("Error parsing single item page %s", item_url)
+            return None
+
     def get_items_from_url(self, url: str) -> List[Item]:
         """Get all items from a specific URL."""
         html = self.get_page_content(url)

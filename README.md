@@ -61,13 +61,16 @@ MONITOR_URLS=https://coins.ay.by/...
 
 ```bash
 # Найти все монеты с ошибками после всех retry
-sudo grep -i "Retrying (Retry(total=0" logs.txt | \
-grep -oP '/lot/[^"]+' | sort -u > missed_coins.txt
+sudo grep -i "Retrying (Retry(total=0" logs.txt | grep -oP '/lot/[^"]+\.html' | sort -u
 
 # Или просто все монеты с любыми ошибками подключения
-sudo grep -i "Retrying.*after connection broken" logs.txt | \
-grep -oP '/lot/[^"]+' | sort -u > missed_coins.txt
+sudo grep -i "Retrying.*after connection broken" logs.txt | grep -oP '/lot/[^"]+\.html' | sort -u
+
+# Для создания готовой команды с /resend:
+(echo "/resend" && sudo grep -i "Retrying (Retry(total=0" logs.txt | grep -oP '/lot/[^"]+\.html' | sort -u)
 ```
+
+**Важно:** Команды grep выше автоматически извлекают только URL без лишних символов. Каждая монета будет на отдельной строке.
 
 ### Формат команды:
 

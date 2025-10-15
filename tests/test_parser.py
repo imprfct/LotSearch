@@ -87,6 +87,55 @@ class TestParser:
         assert items[0].url == "https://coins.ay.by/lot/item3"
         assert items[0].img_url.startswith("https://coins.ay.by")
     
+    def test_parse_single_item_page(self):
+        """Test parsing a single item from its dedicated page."""
+        html = """
+        <html>
+            <body>
+                <h1 class="b-lot-page__title">1 рубль 1924 года</h1>
+                <span class="b-lot-control__main">355,00&nbsp;<span class="b-lot-control__sub-main">бел. руб.</span>
+                    <span class="i-popover">
+                        <span class="i-popover__line i-popover__line_special">
+                            <span><b>119,68</b>$</span><span><b>103,57</b>€</span><span><b>9571,31</b>руб.</span>
+                        </span>
+                        <span class="i-popover__line i-popover__line_special">Справочно по курсу НБРБ</span>
+                    </span>
+                </span>
+                <figure class="pswipe-gallery-element">
+                    <a href="/upload/images/lot1-full.jpg"></a>
+                </figure>
+                <figure class="pswipe-gallery-element">
+                    <a href="/upload/images/lot1-full2.jpg"></a>
+                </figure>
+            </body>
+        </html>
+        """
+        parser = Parser()
+        item = parser.parse_single_item_page(html, "https://ay.by/lot/test-123.html")
+        
+        assert item is not None
+        assert item.title == "1 рубль 1924 года"
+        # Проверяем, что взяли только белорусские рубли
+        assert "355,00" in item.price
+        assert "бел. руб." in item.price
+        # Проверяем, что НЕ взяли другие валюты и справочную информацию
+        assert "$" not in item.price
+        assert "€" not in item.price
+        assert "119,68" not in item.price
+        assert "9571,31" not in item.price
+        assert "Справочно" not in item.price
+        assert item.url == "https://ay.by/lot/test-123.html"
+        assert len(item.image_urls) == 2
+        assert item.img_url.endswith("lot1-full.jpg")
+    
+    def test_parse_single_item_page_no_title(self):
+        """Test parsing fails gracefully when no title found."""
+        html = "<html><body><p>No title here</p></body></html>"
+        parser = Parser()
+        item = parser.parse_single_item_page(html, "https://ay.by/lot/test.html")
+        
+        assert item is None
+    
     @patch('services.parser.requests.get')
     def test_get_page_content_success(self, mock_get):
         """Test successful page fetch"""

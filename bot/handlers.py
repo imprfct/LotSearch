@@ -1516,14 +1516,12 @@ async def cmd_resend_missed_coins(message: Message) -> None:
                 error_count += 1
                 continue
             
-            # Parse item from its own page
-            items = parser.parse_items(html, base_url=url)
-            if not items:
-                logger.warning("No items parsed from %s", url)
+            # Parse single item page
+            item = parser.parse_single_item_page(html, url)
+            if not item:
+                logger.warning("No item parsed from %s", url)
                 error_count += 1
                 continue
-            
-            item = items[0]
             
             # Send notification
             caption = _build_resend_caption(item)
