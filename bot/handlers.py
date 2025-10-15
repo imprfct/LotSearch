@@ -1464,4 +1464,140 @@ async def tracking_reply_handler(message: Message) -> None:
     await _render_menu_for_user(bot, user_id, repository, notice=notice)
 
 
+@router.message(Command("resend"), IsAdmin())
+async def cmd_resend_missed_coins(message: Message) -> None:
+    """Resend notifications for missed coins from logs."""
+    user_id = message.from_user.id
+    
+    # Extract URLs from message text
+    text = message.text or ""
+    lines = text.split('\n')[1:]  # Skip command line
+    
+    urls = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith('/lot/') and line.endswith('.html'):
+            # Convert relative URL to full URL
+            full_url = f"https://ay.by{line}"
+            urls.append(full_url)
+    
+    if not urls:
+        await message.reply(
+            "❌ Не найдено URL монет!\n\n"
+            "Формат:\n"
+            "/resend\n"
+            "/lot/moneta-1.html\n"
+            "/lot/moneta-2.html\n"
+            "..."
+        )
+        return
+    
+    await message.reply(
+        f"🔄 Начинаю отправку {len(urls)} монет...\n"
+        f"Это может занять некоторое время."
+    )
+    
+    sent_count = 0
+    error_count = 0
+    already_known = 0
+    
+    for url in urls:
+        try:
+            # Check if already in database
+            known_urls = item_repository.get_known_urls()
+            if url in known_urls:
+                already_known += 1
+                continue
+            
+            # Fetch item details
+            html = parser.get_page_content(url)
+            if not html:
+                logger.warning("Failed to fetch %s", url)
+                error_count += 1
+                continue
+            
+            # Parse item from its own page
+            items = parser.parse_items(html, base_url=url)
+            if not items:
+                logger.warning("No items parsed from %s", url)
+                error_count += 1
+                continue
+            
+            item = items[0]
+            
+            # Send notification
+            caption = _build_resend_caption(item)
+            media_urls = list(item.image_urls) if item.image_urls else ([item.img_url] if item.img_url else [])
+            
+            try:
+                if len(media_urls) > 1:
+                    media_group = []
+                    for index, media_url in enumerate(media_urls[:MAX_MEDIA_GROUP_SIZE]):
+                        if index == 0:
+                            media_group.append(
+                                InputMediaPhoto(media=media_url, caption=caption, parse_mode="HTML")
+                            )
+                        else:
+                            media_group.append(InputMediaPhoto(media=media_url))
+                    await message.bot.send_media_group(chat_id=message.chat.id, media=media_group)
+                elif media_urls:
+                    await message.bot.send_photo(
+                        chat_id=message.chat.id,
+                        photo=media_urls[0],
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.bot.send_message(
+                        chat_id=message.chat.id,
+                        text=caption,
+                        parse_mode="HTML"
+                    )
+                
+                # Save to database to avoid duplicates
+                item_repository.save_items([item], source_url="resend_command")
+                sent_count += 1
+                
+                # Rate limiting
+                await asyncio.sleep(1.5 if len(media_urls) > 1 else 0.8)
+                
+            except Exception as exc:
+                logger.exception("Failed to send notification for %s", url)
+                error_count += 1
+                
+        except Exception as exc:
+            logger.exception("Error processing %s", url)
+            error_count += 1
+    
+    # Summary
+    summary = (
+        f"✅ Завершено!\n\n"
+        f"📤 Отправлено: {sent_count}\n"
+        f"⏭️ Уже были: {already_known}\n"
+        f"❌ Ошибок: {error_count}\n"
+        f"📊 Всего: {len(urls)}"
+    )
+    await message.answer(summary)
+
+
+def _build_resend_caption(item: Item) -> str:
+    """Build caption for resent coin notification."""
+    title = html.escape(item.title)
+    url = html.escape(item.url, quote=True)
+    raw_price = (item.price or "").strip()
+    has_price = raw_price and raw_price.casefold() != "цена не указана"
+    price_value = html.escape(raw_price) if has_price else "Цена не указана"
+    price_line = f"💰 <b>{price_value}</b>" if has_price else "💰 <i>Цена не указана</i>"
+    
+    return "\n".join([
+        "🔄 <b>Пропущенная монета</b>",
+        f"<b>{title}</b>",
+        "",
+        price_line,
+        "",
+        f"🌐 <a href=\"{url}\">Перейти к лоту</a>",
+    ])
+
+
+
 
