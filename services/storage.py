@@ -72,7 +72,7 @@ class ItemRepository:
             SELECT id, url, title, price, img_url, gallery, created_at
             FROM items
             WHERE source_url = ?
-            ORDER BY datetime(created_at) DESC, id DESC
+            ORDER BY id DESC
             """
         )
         parameters: list[object] = [source_url]
