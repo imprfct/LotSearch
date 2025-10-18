@@ -949,13 +949,13 @@ def _compose_tracking_overview(
             "\nПока ничего не отслеживается. Нажмите кнопку «➕ Добавить» ниже, чтобы выбрать новую страницу."
         )
     else:
-        for page in filtered_pages:
+        for index, page in enumerate(filtered_pages, start=1):
             status = "✅ Активна" if page.enabled else "⏸ Приостановлена"
             escaped_label = html.escape(page.label)
             escaped_url = html.escape(page.url)
             parts.append(
                 "\n"
-                f"<b>{page.id}.</b> {status}\n"
+                f"<b>{index}.</b> {status}\n"
                 f"<a href=\"{escaped_url}\">{escaped_label}</a>\n"
                 f"<code>{escaped_url}</code>"
             )
@@ -1127,10 +1127,10 @@ async def cmd_status(message: Message) -> None:
     if not pages:
         status_text += "— Пока ничего не настроено. Откройте /tracking и нажмите «➕ Добавить».\n"
     else:
-        for page in pages:
+        for index, page in enumerate(pages, start=1):
             icon = "✅" if page.enabled else "⏸"
             status_text += (
-                f"{page.id}. {icon} {page.label}\n"
+                f"{index}. {icon} {page.label}\n"
                 f"    {page.url}\n"
             )
 
