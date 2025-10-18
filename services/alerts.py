@@ -88,6 +88,12 @@ class AdminAlertHandler(logging.Handler):
         if not self._admin_chat_ids or record.levelno < logging.ERROR:
             return
 
+        # Skip CancelledError - это нормальное завершение при остановке бота
+        if record.exc_info and len(record.exc_info) > 0:
+            exc_type = record.exc_info[0]
+            if exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
+                return
+
         message = self._build_message(record)
         coroutine = self._notify(message)
 

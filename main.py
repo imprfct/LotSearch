@@ -47,8 +47,13 @@ logger = logging.getLogger("lotsearch")
 
 
 def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
-    message = context.get("message", "Unhandled event loop exception")
     exception = context.get("exception")
+    
+    # Игнорируем CancelledError - это нормальное завершение при остановке
+    if isinstance(exception, asyncio.CancelledError):
+        return
+    
+    message = context.get("message", "Unhandled event loop exception")
     if exception is not None:
         logger.critical(message, exc_info=exception)
     else:

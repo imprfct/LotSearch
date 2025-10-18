@@ -95,6 +95,9 @@ class Monitor:
                 else:
                     failed_pages += 1
                     self._track_failure(page.url)
+            except asyncio.CancelledError:
+                logger.info("Monitoring task cancelled for %s (bot shutdown)", page.url)
+                raise
             except Exception as exc:
                 failed_pages += 1
                 self._track_failure(page.url)
