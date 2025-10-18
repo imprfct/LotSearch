@@ -222,37 +222,232 @@ def _format_interval_phrase(value: int) -> str:
 def _format_admin_list(admin_ids: Sequence[int]) -> str:
     if not admin_ids:
         return "— <i>Список пуст</i>"
-    return "\n".join(f"• <code>{chat_id}</code>" for chat_id in admin_ids)
+    base_admins = app_settings._base_admin_ids
+    lines = []
+    for chat_id in admin_ids:
+        is_base = chat_id in base_admins
+        suffix = " <i>(из .env)</i>" if is_base else ""
+        lines.append(f"• <code>{chat_id}</code>{suffix}")
+    return "\n".join(lines)
 
 
 def _build_settings_overview() -> str:
     interval = settings.CHECK_INTERVAL_MINUTES
     admins = app_settings.get_admin_ids()
+    timeout = app_settings.get_request_timeout()
+    retries = app_settings.get_request_max_retries()
+    backoff = app_settings.get_request_backoff_factor()
+    delay = app_settings.get_request_delay_seconds()
+    
     return (
         "⚙️ <b>Настройки бота</b>\n\n"
-        f"⏱ Интервал проверки: {_format_minutes(interval)}\n"
+        f"⏱ Интервал проверки: {_format_minutes(interval)} <i>(мин. 3 мин)</i>\n"
         "👥 Администраторы:\n"
         f"{_format_admin_list(admins)}\n\n"
+        "<b>🌐 HTTP настройки:</b>\n"
+        f"⏳ Таймаут запроса: {timeout:.1f}s <i>(рек. 75s)</i>\n"
+        f"🔄 Макс. попыток: {retries} <i>(рек. 6)</i>\n"
+        f"📈 Backoff фактор: {backoff:.1f} <i>(рек. 2.5)</i>\n"
+        f"⏸ Задержка между запросами: {delay:.1f}s <i>(рек. 4s)</i>\n\n"
         "<b>Доступные команды:</b>\n"
-        "/settings interval &lt;минуты&gt; — изменить интервал проверок\n"
-        "/settings add_admin &lt;chat_id&gt; — добавить администратора"
+        "/settings interval &lt;минуты&gt; — интервал (мин. 3)\n"
+        "/settings timeout &lt;секунды&gt; — таймаут запросов\n"
+        "/settings retries &lt;число&gt; — макс. попыток\n"
+        "/settings backoff &lt;число&gt; — backoff фактор\n"
+        "/settings delay &lt;секунды&gt; — задержка запросов\n"
+        "/settings add_admin &lt;chat_id&gt; — добавить админа\n"
+        "/settings remove_admin &lt;chat_id&gt; — удалить админа\n\n"
+        "💡 <i>Рекомендуемые значения указаны справа</i>"
     )
 
 
 def _build_settings_keyboard() -> InlineKeyboardMarkup:
+    """Build main settings menu with category buttons."""
     builder = InlineKeyboardBuilder()
+    
+    # Main categories
     builder.row(
-        InlineKeyboardButton(text="➖ 5", callback_data="settings:interval:-5"),
-        InlineKeyboardButton(text="➖ 1", callback_data="settings:interval:-1"),
-        InlineKeyboardButton(text="➕ 1", callback_data="settings:interval:1"),
-        InlineKeyboardButton(text="➕ 5", callback_data="settings:interval:5"),
+        InlineKeyboardButton(text="⏱ Интервал проверки", callback_data="settings:menu:interval"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🌐 HTTP настройки", callback_data="settings:menu:http"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="👥 Администраторы", callback_data="settings:menu:admins"),
     )
     builder.row(
         InlineKeyboardButton(text="🔄 Обновить", callback_data="settings:refresh"),
-        InlineKeyboardButton(text="➕ Добавить админа", callback_data="settings:add"),
+        InlineKeyboardButton(text="✖️ Закрыть", callback_data="settings:close"),
+    )
+    return builder.as_markup()
+
+
+def _build_interval_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for interval settings."""
+    builder = InlineKeyboardBuilder()
+    interval = settings.CHECK_INTERVAL_MINUTES
+    
+    builder.row(
+        InlineKeyboardButton(text="➖ 5 мин", callback_data="settings:interval:-5"),
+        InlineKeyboardButton(text="➖ 1 мин", callback_data="settings:interval:-1"),
     )
     builder.row(
-        InlineKeyboardButton(text="✖️ Закрыть", callback_data="settings:close"),
+        InlineKeyboardButton(text=f"Текущий: {_format_minutes(interval)}", callback_data="settings:noop"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="➕ 1 мин", callback_data="settings:interval:1"),
+        InlineKeyboardButton(text="➕ 5 мин", callback_data="settings:interval:5"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:main"),
+    )
+    return builder.as_markup()
+
+
+def _build_http_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for HTTP settings."""
+    builder = InlineKeyboardBuilder()
+    
+    # Submenu for HTTP settings
+    builder.row(
+        InlineKeyboardButton(text="⏳ Таймаут запроса", callback_data="settings:menu:http:timeout"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔄 Макс. попыток", callback_data="settings:menu:http:retries"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📈 Backoff фактор", callback_data="settings:menu:http:backoff"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⏸ Задержка запросов", callback_data="settings:menu:http:delay"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:main"),
+    )
+    return builder.as_markup()
+
+
+def _build_timeout_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for timeout setting."""
+    builder = InlineKeyboardBuilder()
+    timeout = app_settings.get_request_timeout()
+    
+    builder.row(
+        InlineKeyboardButton(text="➖ 10s", callback_data="settings:timeout:-10"),
+        InlineKeyboardButton(text="➖ 5s", callback_data="settings:timeout:-5"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"Текущий: {timeout:.0f}s", callback_data="settings:noop"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="➕ 5s", callback_data="settings:timeout:5"),
+        InlineKeyboardButton(text="➕ 10s", callback_data="settings:timeout:10"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:http"),
+    )
+    return builder.as_markup()
+
+
+def _build_retries_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for retries setting."""
+    builder = InlineKeyboardBuilder()
+    retries = app_settings.get_request_max_retries()
+    
+    builder.row(
+        InlineKeyboardButton(text="➖ 2", callback_data="settings:retries:-2"),
+        InlineKeyboardButton(text="➖ 1", callback_data="settings:retries:-1"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"Текущий: {retries}", callback_data="settings:noop"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="➕ 1", callback_data="settings:retries:1"),
+        InlineKeyboardButton(text="➕ 2", callback_data="settings:retries:2"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:http"),
+    )
+    return builder.as_markup()
+
+
+def _build_backoff_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for backoff setting."""
+    builder = InlineKeyboardBuilder()
+    backoff = app_settings.get_request_backoff_factor()
+    
+    builder.row(
+        InlineKeyboardButton(text="➖ 1.0", callback_data="settings:backoff:-1.0"),
+        InlineKeyboardButton(text="➖ 0.5", callback_data="settings:backoff:-0.5"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"Текущий: {backoff:.1f}", callback_data="settings:noop"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="➕ 0.5", callback_data="settings:backoff:0.5"),
+        InlineKeyboardButton(text="➕ 1.0", callback_data="settings:backoff:1.0"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:http"),
+    )
+    return builder.as_markup()
+
+
+def _build_delay_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for delay setting."""
+    builder = InlineKeyboardBuilder()
+    delay = app_settings.get_request_delay_seconds()
+    
+    builder.row(
+        InlineKeyboardButton(text="➖ 2s", callback_data="settings:delay:-2"),
+        InlineKeyboardButton(text="➖ 1s", callback_data="settings:delay:-1"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"Текущий: {delay:.0f}s", callback_data="settings:noop"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="➕ 1s", callback_data="settings:delay:1"),
+        InlineKeyboardButton(text="➕ 2s", callback_data="settings:delay:2"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:http"),
+    )
+    return builder.as_markup()
+
+
+def _build_admins_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for admin management."""
+    builder = InlineKeyboardBuilder()
+    admins = app_settings.get_admin_ids()
+    base_admins = app_settings._base_admin_ids
+    
+    # Show admins with remove buttons for extra admins only
+    for admin_id in admins:
+        is_base = admin_id in base_admins
+        if is_base:
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"👤 {admin_id} (из .env)",
+                    callback_data="settings:noop"
+                )
+            )
+        else:
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"👤 {admin_id}",
+                    callback_data="settings:noop"
+                ),
+                InlineKeyboardButton(
+                    text="❌",
+                    callback_data=f"settings:remove_admin:{admin_id}"
+                )
+            )
+    
+    builder.row(
+        InlineKeyboardButton(text="➕ Добавить", callback_data="settings:add_admin"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:main"),
     )
     return builder.as_markup()
 
@@ -265,9 +460,87 @@ def _clear_settings_message(user_id: int) -> None:
     _settings_message_refs.pop(user_id, None)
 
 
-async def _render_settings_menu(bot, user_id: int, chat_id: int | None = None) -> None:
-    overview = _build_settings_overview()
-    keyboard = _build_settings_keyboard()
+async def _render_settings_menu(bot, user_id: int, chat_id: int | None = None, submenu: str | None = None) -> None:
+    """Render settings menu or submenu."""
+    if submenu == "interval":
+        text = (
+            "⏱ <b>Интервал проверки</b>\n\n"
+            f"Текущее значение: <b>{_format_minutes(settings.CHECK_INTERVAL_MINUTES)}</b>\n"
+            f"Минимум: 3 минуты\n"
+            f"Рекомендуется: <i>5 минут</i>\n\n"
+            "Используйте кнопки ниже для изменения:"
+        )
+        keyboard = _build_interval_keyboard()
+    elif submenu == "http":
+        timeout = app_settings.get_request_timeout()
+        retries = app_settings.get_request_max_retries()
+        backoff = app_settings.get_request_backoff_factor()
+        delay = app_settings.get_request_delay_seconds()
+        text = (
+            "🌐 <b>HTTP настройки</b>\n\n"
+            f"⏳ Таймаут: <b>{timeout:.0f}s</b> <i>(рек. 75s)</i>\n"
+            f"🔄 Попытки: <b>{retries}</b> <i>(рек. 6)</i>\n"
+            f"📈 Backoff: <b>{backoff:.1f}</b> <i>(рек. 2.5)</i>\n"
+            f"⏸ Задержка: <b>{delay:.0f}s</b> <i>(рек. 4s)</i>\n\n"
+            "Выберите параметр для настройки:"
+        )
+        keyboard = _build_http_keyboard()
+    elif submenu == "http:timeout":
+        timeout = app_settings.get_request_timeout()
+        text = (
+            "⏳ <b>Таймаут запроса</b>\n\n"
+            f"Текущее значение: <b>{timeout:.0f}s</b>\n"
+            f"Диапазон: 1-300 секунд\n"
+            f"Рекомендуется: <i>75s</i>\n\n"
+            "Время ожидания ответа от сервера.\n"
+            "Большее значение = надёжнее, но медленнее."
+        )
+        keyboard = _build_timeout_keyboard()
+    elif submenu == "http:retries":
+        retries = app_settings.get_request_max_retries()
+        text = (
+            "🔄 <b>Максимум попыток</b>\n\n"
+            f"Текущее значение: <b>{retries}</b>\n"
+            f"Диапазон: 0-20\n"
+            f"Рекомендуется: <i>6</i>\n\n"
+            "Количество повторных попыток при ошибке.\n"
+            "Больше попыток = надёжнее."
+        )
+        keyboard = _build_retries_keyboard()
+    elif submenu == "http:backoff":
+        backoff = app_settings.get_request_backoff_factor()
+        text = (
+            "📈 <b>Backoff фактор</b>\n\n"
+            f"Текущее значение: <b>{backoff:.1f}</b>\n"
+            f"Диапазон: 0-10\n"
+            f"Рекомендуется: <i>2.5</i>\n\n"
+            "Множитель задержки между попытками.\n"
+            "При 2.5: попытки через 2.5s, 6.25s, 15.6s, 39s..."
+        )
+        keyboard = _build_backoff_keyboard()
+    elif submenu == "http:delay":
+        delay = app_settings.get_request_delay_seconds()
+        text = (
+            "⏸ <b>Задержка между запросами</b>\n\n"
+            f"Текущее значение: <b>{delay:.0f}s</b>\n"
+            f"Диапазон: 0-60 секунд\n"
+            f"Рекомендуется: <i>4s</i>\n\n"
+            "Пауза между запросами к одному домену.\n"
+            "Больше задержка = меньше нагрузка на сервер."
+        )
+        keyboard = _build_delay_keyboard()
+    elif submenu == "admins":
+        admins = app_settings.get_admin_ids()
+        text = (
+            "👥 <b>Администраторы</b>\n\n"
+            f"Текущие администраторы:\n"
+            f"{_format_admin_list(admins)}\n\n"
+            "Администраторы могут управлять ботом."
+        )
+        keyboard = _build_admins_keyboard()
+    else:
+        text = _build_settings_overview()
+        keyboard = _build_settings_keyboard()
 
     ref = _settings_message_refs.get(user_id)
     if ref:
@@ -276,7 +549,7 @@ async def _render_settings_menu(bot, user_id: int, chat_id: int | None = None) -
             await bot.edit_message_text(
                 chat_id=chat_id_ref,
                 message_id=message_id,
-                text=overview,
+                text=text,
                 parse_mode='HTML',
                 reply_markup=keyboard,
             )
@@ -293,7 +566,7 @@ async def _render_settings_menu(bot, user_id: int, chat_id: int | None = None) -
     target_chat = chat_id if chat_id is not None else (ref[0] if ref else user_id)
     sent = await bot.send_message(
         chat_id=target_chat,
-        text=overview,
+        text=text,
         parse_mode='HTML',
         reply_markup=keyboard,
     )
@@ -998,11 +1271,134 @@ async def cmd_settings(message: Message) -> None:
         await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
         return
 
+    if action in {"timeout", "таймаут"}:
+        value = payload.strip()
+        if not value:
+            await message.answer(
+                "❌ <b>Ошибка:</b> укажите таймаут в секундах. Пример: <code>/settings timeout 60</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            timeout = float(value)
+            new_value = app_settings.set_request_timeout(timeout)
+            await message.answer(
+                f"⏳ <b>Таймаут обновлён:</b> {new_value:.1f}s",
+                parse_mode='HTML',
+            )
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML',
+            )
+        return
+
+    if action in {"retries", "попытки"}:
+        value = payload.strip()
+        if not value:
+            await message.answer(
+                "❌ <b>Ошибка:</b> укажите количество попыток. Пример: <code>/settings retries 5</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            retries = int(value)
+            new_value = app_settings.set_request_max_retries(retries)
+            await message.answer(
+                f"🔄 <b>Макс. попыток обновлено:</b> {new_value}",
+                parse_mode='HTML',
+            )
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML',
+            )
+        return
+
+    if action in {"backoff", "бекофф"}:
+        value = payload.strip()
+        if not value:
+            await message.answer(
+                "❌ <b>Ошибка:</b> укажите backoff фактор. Пример: <code>/settings backoff 2.0</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            backoff = float(value)
+            new_value = app_settings.set_request_backoff_factor(backoff)
+            await message.answer(
+                f"📈 <b>Backoff фактор обновлён:</b> {new_value:.1f}",
+                parse_mode='HTML',
+            )
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML',
+            )
+        return
+
+    if action in {"delay", "задержка"}:
+        value = payload.strip()
+        if not value:
+            await message.answer(
+                "❌ <b>Ошибка:</b> укажите задержку в секундах. Пример: <code>/settings delay 3</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            delay = float(value)
+            new_value = app_settings.set_request_delay_seconds(delay)
+            await message.answer(
+                f"⏸ <b>Задержка запросов обновлена:</b> {new_value:.1f}s",
+                parse_mode='HTML',
+            )
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML',
+            )
+        return
+
+    if action in {"remove_admin", "remove", "del_admin"}:
+        value = payload.strip()
+        if not value:
+            await message.answer(
+                "❌ <b>Ошибка:</b> укажите ID администратора для удаления. Пример: <code>/settings remove_admin 123456789</code>",
+                parse_mode='HTML',
+            )
+            return
+
+        try:
+            updated_admins = app_settings.remove_admin(value)
+            await message.answer(
+                f"👥 <b>Администратор удалён</b>\n"
+                f"Теперь администраторов: {len(updated_admins)}.",
+                parse_mode='HTML',
+            )
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ <b>Ошибка:</b> {html.escape(str(exc))}",
+                parse_mode='HTML',
+            )
+        return
+
     await message.answer(
         (
             "❌ <b>Неизвестное действие.</b>\n"
             "Используйте: <code>/settings</code>, <code>/settings interval &lt;минуты&gt;</code>, "
-            "<code>/settings add_admin &lt;chat_id&gt;</code>"
+            "<code>/settings timeout &lt;секунды&gt;</code>, <code>/settings retries &lt;число&gt;</code>, "
+            "<code>/settings backoff &lt;число&gt;</code>, <code>/settings delay &lt;секунды&gt;</code>, "
+            "<code>/settings add_admin &lt;chat_id&gt;</code>, "
+            "<code>/settings remove_admin &lt;chat_id&gt;</code>"
         ),
         parse_mode='HTML',
     )
@@ -1026,11 +1422,38 @@ async def settings_callback(call: CallbackQuery) -> None:
         return
 
     data = call.data or ""
-    parts = data.split(":", 2)
+    parts = data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     payload = parts[2] if len(parts) > 2 else ""
+    extra = parts[3] if len(parts) > 3 else ""
 
     try:
+        # Navigation handlers
+        if action == "menu":
+            if payload == "main":
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+            elif payload == "interval":
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="interval")
+            elif payload == "http":
+                if not extra:
+                    await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http")
+                elif extra == "timeout":
+                    await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:timeout")
+                elif extra == "retries":
+                    await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:retries")
+                elif extra == "backoff":
+                    await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:backoff")
+                elif extra == "delay":
+                    await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:delay")
+            elif payload == "admins":
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="admins")
+            await call.answer()
+            return
+
+        if action == "noop":
+            await call.answer()
+            return
+
         if action == "interval":
             try:
                 delta = int(payload)
@@ -1039,21 +1462,95 @@ async def settings_callback(call: CallbackQuery) -> None:
                 return
             current = settings.CHECK_INTERVAL_MINUTES
             new_value = current + delta
-            if new_value <= 0:
-                await call.answer("Минимальный интервал — 1 минута", show_alert=True)
+            if new_value < 3:
+                await call.answer("Минимальный интервал — 3 минуты", show_alert=True)
                 return
-            app_settings.set_check_interval(new_value)
-            update_monitor_interval(new_value)
-            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
-            await call.answer(f"Интервал: {_format_minutes(new_value)}")
+            try:
+                app_settings.set_check_interval(new_value)
+                update_monitor_interval(new_value)
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="interval")
+                await call.answer(f"✅ {_format_minutes(new_value)}")
+            except ValueError as e:
+                await call.answer(str(e), show_alert=True)
             return
 
-        if action == "refresh":
-            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
-            await call.answer("Обновлено")
+        if action == "timeout":
+            try:
+                delta = float(payload)
+            except ValueError:
+                await call.answer("Некорректное значение", show_alert=True)
+                return
+            current = app_settings.get_request_timeout()
+            new_value = current + delta
+            if new_value <= 0:
+                await call.answer("Минимальный таймаут — 1 секунда", show_alert=True)
+                return
+            try:
+                app_settings.set_request_timeout(new_value)
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:timeout")
+                await call.answer(f"✅ {new_value:.0f}s")
+            except ValueError as e:
+                await call.answer(str(e), show_alert=True)
             return
 
-        if action == "add":
+        if action == "retries":
+            try:
+                delta = int(payload)
+            except ValueError:
+                await call.answer("Некорректное значение", show_alert=True)
+                return
+            current = app_settings.get_request_max_retries()
+            new_value = current + delta
+            if new_value < 0:
+                await call.answer("Минимум попыток — 0", show_alert=True)
+                return
+            try:
+                app_settings.set_request_max_retries(new_value)
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:retries")
+                await call.answer(f"✅ {new_value}")
+            except ValueError as e:
+                await call.answer(str(e), show_alert=True)
+            return
+
+        if action == "backoff":
+            try:
+                delta = float(payload)
+            except ValueError:
+                await call.answer("Некорректное значение", show_alert=True)
+                return
+            current = app_settings.get_request_backoff_factor()
+            new_value = current + delta
+            if new_value < 0:
+                await call.answer("Минимальный backoff — 0", show_alert=True)
+                return
+            try:
+                app_settings.set_request_backoff_factor(new_value)
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:backoff")
+                await call.answer(f"✅ {new_value:.1f}")
+            except ValueError as e:
+                await call.answer(str(e), show_alert=True)
+            return
+
+        if action == "delay":
+            try:
+                delta = float(payload)
+            except ValueError:
+                await call.answer("Некорректное значение", show_alert=True)
+                return
+            current = app_settings.get_request_delay_seconds()
+            new_value = current + delta
+            if new_value < 0:
+                await call.answer("Минимальная задержка — 0 секунд", show_alert=True)
+                return
+            try:
+                app_settings.set_request_delay_seconds(new_value)
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="http:delay")
+                await call.answer(f"✅ {new_value:.0f}s")
+            except ValueError as e:
+                await call.answer(str(e), show_alert=True)
+            return
+
+        if action == "add_admin":
             await _cancel_pending_action(bot, user_id)
             prompt = await message.answer(
                 "Введите ID администратора, которого нужно добавить:",
@@ -1069,6 +1566,25 @@ async def settings_callback(call: CallbackQuery) -> None:
                 ),
             )
             await call.answer("Жду ID администратора")
+            return
+
+        if action == "remove_admin":
+            try:
+                admin_id = int(payload)
+            except ValueError:
+                await call.answer("Некорректный ID", show_alert=True)
+                return
+            try:
+                app_settings.remove_admin(admin_id)
+                await _render_settings_menu(bot, user_id, chat_id=message.chat.id, submenu="admins")
+                await call.answer(f"✅ Удален {admin_id}")
+            except ValueError as e:
+                await call.answer(str(e), show_alert=True)
+            return
+
+        if action == "refresh":
+            await _render_settings_menu(bot, user_id, chat_id=message.chat.id)
+            await call.answer("✅ Обновлено")
             return
 
         if action == "close":

@@ -70,16 +70,34 @@ class Monitor:
         self.repository = ItemRepository()
         self.tracked_pages = TrackedPageRepository()
         self._chat_locks: dict[int, asyncio.Lock] = {}
+        self._failed_pages: dict[str, list[float]] = {}
+        self._max_retry_attempts = 3
+        self._retry_backoff_minutes = 5
     
     async def check_new_items(self) -> None:
         """Check all monitored URLs for new items and send notifications."""
         logger.info("Starting monitoring check…")
+        
+        total_pages = 0
+        successful_pages = 0
+        failed_pages = 0
 
         pages = self.tracked_pages.get_enabled_pages()
         for page in pages:
+            total_pages += 1
             try:
-                await self._check_url(page.url, page.label)
+                success = await self._check_url(page.url, page.label)
+                if success:
+                    successful_pages += 1
+                    if page.url in self._failed_pages:
+                        del self._failed_pages[page.url]
+                        logger.info("✅ Page %s recovered after previous failures", page.url)
+                else:
+                    failed_pages += 1
+                    self._track_failure(page.url)
             except Exception as exc:
+                failed_pages += 1
+                self._track_failure(page.url)
                 logger.exception("Error checking URL %s", page.url)
                 error_msg = (
                     f"⚠️ Критическая ошибка при проверке страницы!\n\n"
@@ -89,9 +107,32 @@ class Monitor:
                     f"Проверка провалена, монеты могли быть упущены!"
                 )
                 await send_critical_alert(self.bot, settings.ADMIN_CHAT_IDS, error_msg, tag_user="@imprfctone")
+        
+        logger.info(
+            "Monitoring check completed: %d total, %d successful, %d failed",
+            total_pages, successful_pages, failed_pages
+        )
     
-    async def _check_url(self, url: str, tracking_label: str | None = None) -> None:
-        """Check a specific URL for new items."""
+    def _track_failure(self, url: str) -> None:
+        """Track page load failure."""
+        import time
+        if url not in self._failed_pages:
+            self._failed_pages[url] = []
+        self._failed_pages[url].append(time.time())
+        
+        # Keep only recent failures
+        cutoff = time.time() - (self._retry_backoff_minutes * 60 * self._max_retry_attempts)
+        self._failed_pages[url] = [t for t in self._failed_pages[url] if t > cutoff]
+        
+        failure_count = len(self._failed_pages[url])
+        if failure_count >= self._max_retry_attempts:
+            logger.error(
+                "❌ Page %s has failed %d times in a row - may need attention!",
+                url, failure_count
+            )
+    
+    async def _check_url(self, url: str, tracking_label: str | None = None) -> bool:
+        """Check a specific URL for new items. Returns True if successful."""
         logger.info("Checking URL: %s", url)
 
         loop = asyncio.get_running_loop()
@@ -106,11 +147,11 @@ class Monitor:
             )
             await send_critical_alert(self.bot, settings.ADMIN_CHAT_IDS, error_msg, tag_user="@imprfctone")
             logger.warning("Skipping %s due to page fetch error: %s", url, self.parser.last_error)
-            return
+            return False
 
         if not current_items:
             logger.warning("No items found at %s", url)
-            return
+            return False
 
         # Check for gallery load errors after all retries exhausted
         if self.parser.gallery_load_errors:
@@ -141,7 +182,7 @@ class Monitor:
                 len(current_items),
                 url,
             )
-            return
+            return True
 
         new_items = [item for item in current_items if item.url not in known_urls]
 
@@ -152,6 +193,8 @@ class Monitor:
 
         self.repository.save_items(current_items, source_url=url)
         logger.info("Found %s new items at %s", len(new_items), url)
+        
+        return True
         logger.info("Sent %s notifications for %s", notified, url)
     
     async def _send_notification(

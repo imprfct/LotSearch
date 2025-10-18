@@ -3,6 +3,10 @@ version: "3.9"
 services:
   lotsearch:
     build: .
+    dns:
+      - 1.1.1.1 # Cloudflare DNS (primary)
+      - 8.8.8.8 # Google DNS (fallback)
+      - 8.8.4.4 # Google DNS Secondary (fallback)
     env_file:
       - .env
     environment:

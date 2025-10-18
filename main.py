@@ -37,6 +37,9 @@ def configure_logging() -> None:
         ],
         force=True,
     )
+    
+    # Отключаем спам от urllib3 retry логов
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 
 configure_logging()

@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import List, Optional
 
 import requests
 from requests import Session
 from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from urllib3.util.retry import Retry
 
 from config import settings
@@ -28,7 +29,6 @@ class Parser:
 
     def __init__(self, session: Optional[Session] = None) -> None:
         self.headers = settings.HEADERS
-        self.timeout = settings.REQUEST_TIMEOUT
         self.session = session or self._create_session()
         if session is not None:
             headers = getattr(self.session, "headers", None)
@@ -38,14 +38,32 @@ class Parser:
         self.last_page_url: Optional[str] = None
         self.last_page_load_failed: bool = False
         self.gallery_load_errors: list[tuple[str, Exception]] = []
+        self._last_request_time: dict[str, float] = {}
+
+    def _apply_rate_limit(self, url: str) -> None:
+        """Apply rate limiting based on domain."""
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        delay = settings.REQUEST_DELAY_SECONDS
+        
+        if domain in self._last_request_time:
+            elapsed = time.time() - self._last_request_time[domain]
+            if elapsed < delay:
+                sleep_time = delay - elapsed
+                logger.debug("Rate limiting: sleeping %.2fs for %s", sleep_time, domain)
+                time.sleep(sleep_time)
+        
+        self._last_request_time[domain] = time.time()
 
     def get_page_content(self, url: str) -> Optional[str]:
         """Fetch HTML content from an URL."""
+        self._apply_rate_limit(url)
         self.last_error = None
         self.last_page_url = None
         self.last_page_load_failed = False
+        timeout = settings.REQUEST_TIMEOUT
         try:
-            response = self.session.get(url, headers=self.headers, timeout=self.timeout)
+            response = self.session.get(url, headers=self.headers, timeout=timeout)
             response.raise_for_status()
             self.last_page_url = getattr(response, "url", url)
             return response.text
@@ -262,8 +280,9 @@ class Parser:
         return urljoin(base_url or BASE_URL, candidate)
 
     def _load_item_gallery(self, item_url: str) -> List[str]:
+        timeout = settings.REQUEST_TIMEOUT
         try:
-            response = self.session.get(item_url, headers=self.headers, timeout=self.timeout)
+            response = self.session.get(item_url, headers=self.headers, timeout=timeout)
             response.raise_for_status()
         except requests.RequestException as exc:
             logger.debug("Failed to fetch item gallery for %s: %s", item_url, exc)
@@ -311,8 +330,12 @@ class Parser:
                 status_forcelist=(429, 500, 502, 503, 504),
                 allowed_methods=frozenset({"GET"}),
                 raise_on_status=False,
+                # Не raise сразу при редиректе
+                raise_on_redirect=False,
+                # Убираем спам в логах от urllib3
+                respect_retry_after_header=True,
             )
-            adapter = HTTPAdapter(max_retries=retry)
+            adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
             session.mount("http://", adapter)
             session.mount("https://", adapter)
         session.headers.update(self.headers)

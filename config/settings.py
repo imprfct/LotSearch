@@ -29,6 +29,7 @@ class Settings:
     REQUEST_TIMEOUT: float = field(init=False)
     REQUEST_MAX_RETRIES: int = field(init=False)
     REQUEST_BACKOFF_FACTOR: float = field(init=False)
+    REQUEST_DELAY_SECONDS: float = field(init=False)
 
     def __post_init__(self) -> None:
         self.reload()
@@ -74,7 +75,7 @@ class Settings:
         self.DB_PATH = db_path
 
         try:
-            timeout = float(os.getenv("REQUEST_TIMEOUT", "10"))
+            timeout = float(os.getenv("REQUEST_TIMEOUT", "60"))
         except ValueError as exc:
             raise ValueError("REQUEST_TIMEOUT must be a number") from exc
         if timeout <= 0:
@@ -82,7 +83,7 @@ class Settings:
         self.REQUEST_TIMEOUT = timeout
 
         try:
-            retries = int(os.getenv("REQUEST_MAX_RETRIES", "3"))
+            retries = int(os.getenv("REQUEST_MAX_RETRIES", "5"))
         except ValueError as exc:
             raise ValueError("REQUEST_MAX_RETRIES must be an integer") from exc
         if retries < 0:
@@ -90,12 +91,20 @@ class Settings:
         self.REQUEST_MAX_RETRIES = retries
 
         try:
-            backoff = float(os.getenv("REQUEST_BACKOFF_FACTOR", "0.5"))
+            backoff = float(os.getenv("REQUEST_BACKOFF_FACTOR", "2.0"))
         except ValueError as exc:
             raise ValueError("REQUEST_BACKOFF_FACTOR must be a number") from exc
         if backoff < 0:
             raise ValueError("REQUEST_BACKOFF_FACTOR cannot be negative")
         self.REQUEST_BACKOFF_FACTOR = backoff
+
+        try:
+            delay = float(os.getenv("REQUEST_DELAY_SECONDS", "3.0"))
+        except ValueError as exc:
+            raise ValueError("REQUEST_DELAY_SECONDS must be a number") from exc
+        if delay < 0:
+            raise ValueError("REQUEST_DELAY_SECONDS cannot be negative")
+        self.REQUEST_DELAY_SECONDS = delay
 
     def validate(self) -> None:
         if not self.BOT_TOKEN:

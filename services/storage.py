@@ -448,6 +448,10 @@ class AppSettingsRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._default_interval = settings.CHECK_INTERVAL_MINUTES
         self._base_admin_ids = tuple(settings.ADMIN_CHAT_IDS)
+        self._default_timeout = 60.0
+        self._default_retries = 5
+        self._default_backoff = 2.0
+        self._default_delay = 3.0
         self._initialize()
         self.sync_settings()
 
@@ -514,6 +518,8 @@ class AppSettingsRepository:
     def set_check_interval(self, minutes: int) -> int:
         if minutes <= 0:
             raise ValueError("Интервал должен быть положительным")
+        if minutes < 3:
+            raise ValueError("Минимальный интервал — 3 минуты (чтобы не перегружать сервер)")
         self._set_meta("check_interval_minutes", str(minutes))
         settings.CHECK_INTERVAL_MINUTES = minutes
         return minutes
@@ -546,7 +552,119 @@ class AppSettingsRepository:
         settings.ADMIN_CHAT_IDS = updated
         return updated
 
+    def remove_admin(self, chat_id: int | str) -> tuple[int, ...]:
+        """Remove administrator from extra admins list."""
+        try:
+            target_id = int(chat_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ID администратора должен быть целым числом") from exc
+
+        if target_id <= 0:
+            raise ValueError("ID администратора должен быть положительным")
+
+        # Don't allow removing admins from .env
+        if target_id in self._base_admin_ids:
+            raise ValueError("Нельзя удалить администратора из .env")
+
+        extras = self._load_extra_admins()
+        if target_id not in extras:
+            raise ValueError("Администратор не найден в дополнительных админах")
+
+        extras.remove(target_id)
+        self._save_extra_admins(extras)
+        updated = self.get_admin_ids()
+        settings.ADMIN_CHAT_IDS = updated
+        return updated
+
+    def get_request_timeout(self) -> float:
+        """Get HTTP request timeout in seconds."""
+        raw = self._get_meta("request_timeout")
+        if not raw:
+            return self._default_timeout
+        try:
+            timeout = float(raw)
+        except ValueError:
+            return self._default_timeout
+        return timeout if timeout > 0 else self._default_timeout
+
+    def set_request_timeout(self, timeout: float) -> float:
+        """Set HTTP request timeout in seconds."""
+        if timeout <= 0:
+            raise ValueError("Таймаут должен быть положительным")
+        if timeout > 300:
+            raise ValueError("Таймаут не должен превышать 300 секунд")
+        self._set_meta("request_timeout", str(timeout))
+        settings.REQUEST_TIMEOUT = timeout
+        return timeout
+
+    def get_request_max_retries(self) -> int:
+        """Get max HTTP retry attempts."""
+        raw = self._get_meta("request_max_retries")
+        if not raw:
+            return self._default_retries
+        try:
+            retries = int(raw)
+        except ValueError:
+            return self._default_retries
+        return retries if retries >= 0 else self._default_retries
+
+    def set_request_max_retries(self, retries: int) -> int:
+        """Set max HTTP retry attempts."""
+        if retries < 0:
+            raise ValueError("Количество попыток не может быть отрицательным")
+        if retries > 20:
+            raise ValueError("Количество попыток не должно превышать 20")
+        self._set_meta("request_max_retries", str(retries))
+        settings.REQUEST_MAX_RETRIES = retries
+        return retries
+
+    def get_request_backoff_factor(self) -> float:
+        """Get HTTP retry backoff factor."""
+        raw = self._get_meta("request_backoff_factor")
+        if not raw:
+            return self._default_backoff
+        try:
+            backoff = float(raw)
+        except ValueError:
+            return self._default_backoff
+        return backoff if backoff >= 0 else self._default_backoff
+
+    def set_request_backoff_factor(self, backoff: float) -> float:
+        """Set HTTP retry backoff factor."""
+        if backoff < 0:
+            raise ValueError("Backoff фактор не может быть отрицательным")
+        if backoff > 10:
+            raise ValueError("Backoff фактор не должен превышать 10")
+        self._set_meta("request_backoff_factor", str(backoff))
+        settings.REQUEST_BACKOFF_FACTOR = backoff
+        return backoff
+
+    def get_request_delay_seconds(self) -> float:
+        """Get delay between requests to same domain."""
+        raw = self._get_meta("request_delay_seconds")
+        if not raw:
+            return self._default_delay
+        try:
+            delay = float(raw)
+        except ValueError:
+            return self._default_delay
+        return delay if delay >= 0 else self._default_delay
+
+    def set_request_delay_seconds(self, delay: float) -> float:
+        """Set delay between requests to same domain."""
+        if delay < 0:
+            raise ValueError("Задержка не может быть отрицательной")
+        if delay > 60:
+            raise ValueError("Задержка не должна превышать 60 секунд")
+        self._set_meta("request_delay_seconds", str(delay))
+        settings.REQUEST_DELAY_SECONDS = delay
+        return delay
+
     def sync_settings(self) -> None:
         interval = self.get_check_interval()
         settings.CHECK_INTERVAL_MINUTES = interval
         settings.ADMIN_CHAT_IDS = self.get_admin_ids()
+        settings.REQUEST_TIMEOUT = self.get_request_timeout()
+        settings.REQUEST_MAX_RETRIES = self.get_request_max_retries()
+        settings.REQUEST_BACKOFF_FACTOR = self.get_request_backoff_factor()
+        settings.REQUEST_DELAY_SECONDS = self.get_request_delay_seconds()
