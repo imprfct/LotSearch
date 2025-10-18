@@ -118,19 +118,35 @@ class Parser:
 
                 price = self._extract_price(list(card.stripped_strings))
 
-                gallery_urls = self._load_item_gallery(link)
-                if gallery_urls:
-                    image_urls = gallery_urls
+                # Load full item details including gallery, description table and text
+                full_item = self._load_full_item_details(link)
+                if full_item:
+                    # Use data from full page
+                    item = Item(
+                        url=link,
+                        title=full_item.title or title,
+                        price=full_item.price or price,
+                        img_url=full_item.img_url or img_url,
+                        image_urls=full_item.image_urls or (img_url,),
+                        description_table=full_item.description_table,
+                        description_text=full_item.description_text,
+                    )
                 else:
-                    image_urls = [img_url]
+                    # Fallback to card data
+                    gallery_urls = self._load_item_gallery(link)
+                    if gallery_urls:
+                        image_urls = gallery_urls
+                    else:
+                        image_urls = [img_url]
 
-                item = Item(
-                    url=link,
-                    title=title,
-                    price=price,
-                    img_url=image_urls[0],
-                    image_urls=tuple(image_urls),
-                )
+                    item = Item(
+                        url=link,
+                        title=title,
+                        price=price,
+                        img_url=image_urls[0],
+                        image_urls=tuple(image_urls),
+                    )
+                
                 items.append(item)
             except Exception:
                 logger.warning("Error parsing item", exc_info=True)
@@ -212,6 +228,12 @@ class Parser:
                             price = price_text
                             break
             
+            # Parse description table
+            description_table = self._parse_description_table(soup)
+            
+            # Parse description text
+            description_text = self._parse_description_text(soup)
+            
             # Get gallery images
             gallery_urls = self._parse_gallery_images(html, item_url)
             
@@ -242,6 +264,8 @@ class Parser:
                 price=price,
                 img_url=gallery_urls[0],
                 image_urls=tuple(gallery_urls),
+                description_table=description_table,
+                description_text=description_text,
             )
             
             return item
@@ -291,6 +315,19 @@ class Parser:
 
         return self._parse_gallery_images(response.text, item_url)
 
+    def _load_full_item_details(self, item_url: str) -> Optional[Item]:
+        """Load full item details from item page including description."""
+        timeout = settings.REQUEST_TIMEOUT
+        try:
+            self._apply_rate_limit(item_url)
+            response = self.session.get(item_url, headers=self.headers, timeout=timeout)
+            response.raise_for_status()
+            return self.parse_single_item_page(response.text, item_url)
+        except requests.RequestException as exc:
+            logger.debug("Failed to fetch full item details for %s: %s", item_url, exc)
+            self.gallery_load_errors.append((item_url, exc))
+            return None
+
     def _parse_gallery_images(self, html: str, base_url: str) -> List[str]:
         soup = BeautifulSoup(html, 'html.parser')
         urls: List[str] = []
@@ -317,6 +354,65 @@ class Parser:
             unique.append(media_url)
 
         return unique
+
+    def _parse_description_table(self, soup: BeautifulSoup) -> dict[str, str] | None:
+        """Parse description table from item page."""
+        description_table = {}
+        
+        # Ищем таблицу в блоке описания
+        description_block = soup.select_one('.b-description')
+        if not description_block:
+            return None
+        
+        # Ищем все строки таблицы внутри tbody
+        table_body = description_block.select_one('table tbody')
+        if not table_body:
+            return None
+        
+        for row in table_body.select('tr'):
+            cells = row.select('td')
+            if len(cells) == 2:
+                key = cells[0].get_text(strip=True)
+                value = cells[1].get_text(strip=True)
+                if key and value:
+                    description_table[key] = value
+        
+        return description_table if description_table else None
+
+    def _parse_description_text(self, soup: BeautifulSoup) -> str | None:
+        """Parse description text from item page."""
+        # Ищем div с классом b-description__item
+        description_items = soup.select('.b-description__item')
+        
+        if not description_items:
+            return None
+        
+        # Собираем текст из всех найденных элементов
+        text_parts = []
+        for item in description_items:
+            # Если элемент содержит таблицу, ищем текст вне таблицы (например, в <p> тегах)
+            if item.select_one('table'):
+                # Извлекаем текст из параграфов и других текстовых элементов
+                for p in item.select('p'):
+                    text = p.get_text(strip=True)
+                    if text:
+                        text_parts.append(text)
+                # Также ищем прямой текст в div, не в таблице
+                for div in item.select('div'):
+                    if not div.select_one('table') and div.get_text(strip=True):
+                        # Проверяем, что это не заголовок
+                        if 'b-description__heading' not in div.get('class', []):
+                            text = div.get_text(strip=True)
+                            # Избегаем дубликатов
+                            if text and text not in text_parts:
+                                text_parts.append(text)
+            else:
+                # Если нет таблицы, берём весь текст
+                text = item.get_text(strip=True)
+                if text:
+                    text_parts.append(text)
+        
+        return '\n\n'.join(text_parts) if text_parts else None
 
     def _create_session(self) -> Session:
         session = requests.Session()

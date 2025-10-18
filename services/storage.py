@@ -29,6 +29,8 @@ class ItemRepository:
                     price TEXT NOT NULL,
                     img_url TEXT NOT NULL,
                     gallery TEXT NOT NULL DEFAULT '[]',
+                    description_table TEXT,
+                    description_text TEXT,
                     source_url TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
@@ -38,6 +40,7 @@ class ItemRepository:
                 "CREATE INDEX IF NOT EXISTS idx_items_source_url ON items(source_url)"
             )
             self._ensure_gallery_column(connection)
+            self._ensure_description_columns(connection)
 
     @staticmethod
     def _ensure_gallery_column(connection: sqlite3.Connection) -> None:
@@ -46,6 +49,19 @@ class ItemRepository:
         if not has_gallery:
             connection.execute("ALTER TABLE items ADD COLUMN gallery TEXT NOT NULL DEFAULT '[]'")
             connection.execute("UPDATE items SET gallery = '[]' WHERE gallery IS NULL")
+            connection.commit()
+
+    @staticmethod
+    def _ensure_description_columns(connection: sqlite3.Connection) -> None:
+        columns = connection.execute("PRAGMA table_info(items)").fetchall()
+        column_names = {col[1] for col in columns}
+        
+        if "description_table" not in column_names:
+            connection.execute("ALTER TABLE items ADD COLUMN description_table TEXT")
+            connection.commit()
+        
+        if "description_text" not in column_names:
+            connection.execute("ALTER TABLE items ADD COLUMN description_text TEXT")
             connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -69,7 +85,7 @@ class ItemRepository:
 
         query = (
             """
-            SELECT id, url, title, price, img_url, gallery, created_at
+            SELECT id, url, title, price, img_url, gallery, description_table, description_text, created_at
             FROM items
             WHERE source_url = ?
             ORDER BY id DESC
@@ -87,7 +103,9 @@ class ItemRepository:
         recent: list[tuple[Item, datetime | None]] = []
         for row in rows:
             gallery_raw = row[5]
-            created_at = row[6]
+            description_table_raw = row[6]
+            description_text = row[7]
+            created_at = row[8]
             saved_at: datetime | None
             try:
                 saved_at = datetime.fromisoformat(created_at) if created_at else None
@@ -99,6 +117,12 @@ class ItemRepository:
                 gallery_list = []
             if not gallery_list:
                 gallery_list = [row[4]] if row[4] else []
+            
+            try:
+                description_table = json.loads(description_table_raw) if description_table_raw else None
+            except json.JSONDecodeError:
+                description_table = None
+            
             recent.append(
                 (
                     Item(
@@ -107,6 +131,8 @@ class ItemRepository:
                         price=row[3],
                         img_url=row[4],
                         image_urls=tuple(gallery_list),
+                        description_table=description_table,
+                        description_text=description_text,
                     ),
                     saved_at,
                 )
@@ -122,6 +148,8 @@ class ItemRepository:
                 item.price,
                 item.img_url,
                 json.dumps(list(item.image_urls) or ([item.img_url] if item.img_url else [])),
+                json.dumps(item.description_table) if item.description_table else None,
+                item.description_text,
                 source_url,
                 timestamp,
             )
@@ -132,13 +160,15 @@ class ItemRepository:
         with self._connect() as connection:
             connection.executemany(
                 """
-                INSERT INTO items (url, title, price, img_url, gallery, source_url, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO items (url, title, price, img_url, gallery, description_table, description_text, source_url, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     title=excluded.title,
                     price=excluded.price,
                     img_url=excluded.img_url,
                     gallery=excluded.gallery,
+                    description_table=excluded.description_table,
+                    description_text=excluded.description_text,
                     source_url=excluded.source_url
                 """,
                 records,

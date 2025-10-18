@@ -2,7 +2,7 @@
 Data models for the application
 """
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Dict, Tuple
 
 
 @dataclass(slots=True)
@@ -13,6 +13,8 @@ class Item:
     price: str
     img_url: str
     image_urls: Tuple[str, ...] = ()
+    description_table: Dict[str, str] | None = None
+    description_text: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.image_urls, tuple):

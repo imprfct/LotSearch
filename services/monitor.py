@@ -50,13 +50,50 @@ def _build_notification_caption(
             lines.append(f"📰 Страница: <b>{tracking}</b>")
         lines.append("")
 
-    lines.extend(
-        [
-            price_line,
-            "",
-            f"🌐 <a href=\"{url}\">Перейти к лоту</a>",
-        ]
-    )
+    lines.extend([price_line, ""])
+
+    # Check if we have description content
+    has_table = bool(item.description_table and len(item.description_table) > 0)
+    has_text = bool(item.description_text and item.description_text.strip())
+    has_any_description = has_table or has_text
+    
+    # Only show description section if we have table AND text, or just text
+    # If only table - show it without header and top separator
+    if has_any_description:
+        # Show header and top separator only if we have text (with or without table)
+        if has_text:
+            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append("<b>📋 Описание лота</b>")
+            lines.append("")
+        
+        # Add table if available
+        if has_table and item.description_table:
+            for key, value in item.description_table.items():
+                key_escaped = escape(key)
+                value_escaped = escape(value)
+                lines.append(f"<b>{key_escaped}:</b> {value_escaped}")
+            lines.append("")
+        
+        # Add description text if available
+        if has_text and item.description_text:
+            desc_escaped = escape(item.description_text)
+            # Limit description length to avoid message being too long
+            max_desc_length = 400
+            was_truncated = len(desc_escaped) > max_desc_length
+            if was_truncated:
+                desc_escaped = desc_escaped[:max_desc_length].rstrip() + "..."
+            
+            lines.append(f"<i>{desc_escaped}</i>")
+            
+            if was_truncated:
+                lines.append("")
+                lines.append("💬 <i>Описание обрезано. Полный текст на странице лота.</i>")
+        
+        # Always add bottom separator if we have any description
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+
+    lines.append(f"🌐 <a href=\"{url}\">Перейти к лоту</a>")
 
     return "\n".join(lines)
 
