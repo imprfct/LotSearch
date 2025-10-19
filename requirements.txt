@@ -3,7 +3,7 @@
 aiogram==3.13.1
 
 # HTTP requests and parsing
-requests==2.31.0
+aiohttp==3.9.1
 beautifulsoup4==4.12.3
 
 # Environment variables

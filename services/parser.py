@@ -1,17 +1,14 @@
 """Parser service for extracting items from web pages."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-import time
 from typing import List, Optional
 
-import requests
-from requests import Session
-from requests.adapters import HTTPAdapter
+import aiohttp
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-from urllib3.util.retry import Retry
 
 from config import settings
 from models import Item
@@ -27,72 +24,92 @@ PRICE_PATTERN = re.compile(
 class Parser:
     """Web page parser for extracting product information."""
 
-    def __init__(self, session: Optional[Session] = None) -> None:
+    def __init__(self, session: Optional[aiohttp.ClientSession] = None) -> None:
         self.headers = settings.HEADERS
-        self.session = session or self._create_session()
-        if session is not None:
-            headers = getattr(self.session, "headers", None)
-            if headers is not None and hasattr(headers, "update"):
-                headers.update(self.headers)
+        self.session = session
+        self._owns_session = session is None
         self.last_error: Optional[Exception] = None
         self.last_page_url: Optional[str] = None
         self.last_page_load_failed: bool = False
         self.gallery_load_errors: list[tuple[str, Exception]] = []
         self._last_request_time: dict[str, float] = {}
+        self._rate_limit_lock = asyncio.Lock()
 
-    def _apply_rate_limit(self, url: str) -> None:
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self.session is None:
+            timeout = aiohttp.ClientTimeout(total=settings.REQUEST_TIMEOUT)
+            connector = aiohttp.TCPConnector(limit_per_host=5, limit=20)
+            self.session = aiohttp.ClientSession(
+                headers=self.headers,
+                timeout=timeout,
+                connector=connector,
+            )
+        return self.session
+
+    async def close(self) -> None:
+        """Close the session if we own it."""
+        if self._owns_session and self.session is not None:
+            await self.session.close()
+            self.session = None
+
+    async def _apply_rate_limit(self, url: str) -> None:
         """Apply rate limiting based on domain."""
-        parsed = urlparse(url)
-        domain = parsed.netloc
-        delay = settings.REQUEST_DELAY_SECONDS
-        
-        if domain in self._last_request_time:
-            elapsed = time.time() - self._last_request_time[domain]
-            if elapsed < delay:
-                sleep_time = delay - elapsed
-                logger.debug("Rate limiting: sleeping %.2fs for %s", sleep_time, domain)
-                time.sleep(sleep_time)
-        
-        self._last_request_time[domain] = time.time()
+        async with self._rate_limit_lock:
+            parsed = urlparse(url)
+            domain = parsed.netloc
+            delay = settings.REQUEST_DELAY_SECONDS
+            
+            if domain in self._last_request_time:
+                import time
+                elapsed = time.time() - self._last_request_time[domain]
+                if elapsed < delay:
+                    sleep_time = delay - elapsed
+                    logger.debug("Rate limiting: sleeping %.2fs for %s", sleep_time, domain)
+                    await asyncio.sleep(sleep_time)
+            
+            import time
+            self._last_request_time[domain] = time.time()
 
-    def get_page_content(self, url: str) -> Optional[str]:
+    async def get_page_content(self, url: str) -> Optional[str]:
         """Fetch HTML content from an URL."""
-        self._apply_rate_limit(url)
+        await self._apply_rate_limit(url)
         self.last_error = None
         self.last_page_url = None
         self.last_page_load_failed = False
-        timeout = settings.REQUEST_TIMEOUT
+        
+        session = await self._get_session()
+        
         try:
-            response = self.session.get(url, headers=self.headers, timeout=timeout)
-            response.raise_for_status()
-            self.last_page_url = getattr(response, "url", url)
-            return response.text
-        except requests.Timeout as exc:
+            async with session.get(url, headers=self.headers) as response:
+                response.raise_for_status()
+                self.last_page_url = str(response.url)
+                return await response.text()
+        except asyncio.TimeoutError as exc:
             self.last_error = exc
             self.last_page_load_failed = True
             logger.warning("Timeout fetching page %s: %s", url, exc)
             return None
-        except requests.ConnectionError as exc:
+        except aiohttp.ClientConnectionError as exc:
             self.last_error = exc
             self.last_page_load_failed = True
             logger.warning("Connection error fetching page %s: %s", url, exc)
             logger.debug("Connection error details", exc_info=True)
             return None
-        except requests.HTTPError as exc:
+        except aiohttp.ClientResponseError as exc:
             self.last_error = exc
             self.last_page_load_failed = True
-            status_code = getattr(exc.response, "status_code", "unknown")
-            logger.error("HTTP error fetching page %s (status %s)", url, status_code)
+            logger.error("HTTP error fetching page %s (status %s)", url, exc.status)
             logger.debug("HTTP error details", exc_info=True)
             return None
-        except requests.RequestException as e:
-            self.last_error = e
+        except aiohttp.ClientError as exc:
+            self.last_error = exc
             self.last_page_load_failed = True
-            logger.error("Error fetching page %s: %s", url, e)
+            logger.error("Error fetching page %s: %s", url, exc)
             logger.debug("Unhandled request exception", exc_info=True)
             return None
 
-    def parse_items(self, html: str, base_url: Optional[str] = None) -> List[Item]:
+    async def parse_items(self, html: str, base_url: Optional[str] = None) -> List[Item]:
         """Parse items from HTML content."""
         soup = BeautifulSoup(html, 'html.parser')
         items = []
@@ -119,7 +136,7 @@ class Parser:
                 price = self._extract_price(list(card.stripped_strings))
 
                 # Load full item details including gallery, description table and text
-                full_item = self._load_full_item_details(link)
+                full_item = await self._load_full_item_details(link)
                 if full_item:
                     # Use data from full page
                     item = Item(
@@ -133,7 +150,7 @@ class Parser:
                     )
                 else:
                     # Fallback to card data
-                    gallery_urls = self._load_item_gallery(link)
+                    gallery_urls = await self._load_item_gallery(link)
                     if gallery_urls:
                         image_urls = gallery_urls
                     else:
@@ -274,13 +291,13 @@ class Parser:
             logger.exception("Error parsing single item page %s", item_url)
             return None
 
-    def get_items_from_url(self, url: str) -> List[Item]:
+    async def get_items_from_url(self, url: str) -> List[Item]:
         """Get all items from a specific URL."""
-        html = self.get_page_content(url)
+        html = await self.get_page_content(url)
         if not html:
             return []
         base_url = self.last_page_url or url
-        return self.parse_items(html, base_url=base_url)
+        return await self.parse_items(html, base_url=base_url)
 
     @staticmethod
     def _extract_price(text_nodes: List[str]) -> str:
@@ -303,27 +320,31 @@ class Parser:
             return urljoin(base_url or BASE_URL, candidate)
         return urljoin(base_url or BASE_URL, candidate)
 
-    def _load_item_gallery(self, item_url: str) -> List[str]:
-        timeout = settings.REQUEST_TIMEOUT
+    async def _load_item_gallery(self, item_url: str) -> List[str]:
+        """Load gallery images from item page."""
+        session = await self._get_session()
+        
         try:
-            response = self.session.get(item_url, headers=self.headers, timeout=timeout)
-            response.raise_for_status()
-        except requests.RequestException as exc:
+            async with session.get(item_url, headers=self.headers) as response:
+                response.raise_for_status()
+                html = await response.text()
+                return self._parse_gallery_images(html, item_url)
+        except aiohttp.ClientError as exc:
             logger.debug("Failed to fetch item gallery for %s: %s", item_url, exc)
             self.gallery_load_errors.append((item_url, exc))
             return []
 
-        return self._parse_gallery_images(response.text, item_url)
-
-    def _load_full_item_details(self, item_url: str) -> Optional[Item]:
+    async def _load_full_item_details(self, item_url: str) -> Optional[Item]:
         """Load full item details from item page including description."""
-        timeout = settings.REQUEST_TIMEOUT
+        session = await self._get_session()
+        
         try:
-            self._apply_rate_limit(item_url)
-            response = self.session.get(item_url, headers=self.headers, timeout=timeout)
-            response.raise_for_status()
-            return self.parse_single_item_page(response.text, item_url)
-        except requests.RequestException as exc:
+            await self._apply_rate_limit(item_url)
+            async with session.get(item_url, headers=self.headers) as response:
+                response.raise_for_status()
+                html = await response.text()
+                return self.parse_single_item_page(html, item_url)
+        except aiohttp.ClientError as exc:
             logger.debug("Failed to fetch full item details for %s: %s", item_url, exc)
             self.gallery_load_errors.append((item_url, exc))
             return None
@@ -413,26 +434,3 @@ class Parser:
                     text_parts.append(text)
         
         return '\n\n'.join(text_parts) if text_parts else None
-
-    def _create_session(self) -> Session:
-        session = requests.Session()
-        retries = settings.REQUEST_MAX_RETRIES
-        if retries > 0:
-            retry = Retry(
-                total=retries,
-                connect=retries,
-                read=retries,
-                backoff_factor=settings.REQUEST_BACKOFF_FACTOR,
-                status_forcelist=(429, 500, 502, 503, 504),
-                allowed_methods=frozenset({"GET"}),
-                raise_on_status=False,
-                # Не raise сразу при редиректе
-                raise_on_redirect=False,
-                # Убираем спам в логах от urllib3
-                respect_retry_after_header=True,
-            )
-            adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
-            session.mount("http://", adapter)
-            session.mount("https://", adapter)
-        session.headers.update(self.headers)
-        return session

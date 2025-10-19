@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -13,6 +14,8 @@ from models import Item, TrackedPage
 
 
 class ItemRepository:
+    _db_lock = threading.Lock()
+    
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or settings.DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,28 +160,31 @@ class ItemRepository:
         ]
         if not records:
             return
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO items (url, title, price, img_url, gallery, description_table, description_text, source_url, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    title=excluded.title,
-                    price=excluded.price,
-                    img_url=excluded.img_url,
-                    gallery=excluded.gallery,
-                    description_table=excluded.description_table,
-                    description_text=excluded.description_text,
-                    source_url=excluded.source_url
-                """,
-                records,
-            )
-            connection.commit()
+        
+        with self._db_lock:
+            with self._connect() as connection:
+                connection.executemany(
+                    """
+                    INSERT INTO items (url, title, price, img_url, gallery, description_table, description_text, source_url, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(url) DO UPDATE SET
+                        title=excluded.title,
+                        price=excluded.price,
+                        img_url=excluded.img_url,
+                        gallery=excluded.gallery,
+                        description_table=excluded.description_table,
+                        description_text=excluded.description_text,
+                        source_url=excluded.source_url
+                    """,
+                    records,
+                )
+                connection.commit()
 
     def clear(self) -> None:
-        with self._connect() as connection:
-            connection.execute("DELETE FROM items")
-            connection.commit()
+        with self._db_lock:
+            with self._connect() as connection:
+                connection.execute("DELETE FROM items")
+                connection.commit()
 
 
 ORDER_LABEL_HINTS = {
@@ -247,6 +253,8 @@ def _apply_order_to_url(url: str, order: str | None) -> str:
 
 
 class TrackedPageRepository:
+    _db_lock = threading.Lock()
+    
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or settings.DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,42 +292,43 @@ class TrackedPageRepository:
     def _ensure_seed(self, defaults: Sequence[str]) -> None:
         normalized_defaults = [url.strip() for url in defaults or () if url.strip()]
 
-        with self._connect() as connection:
-            seeded_row = connection.execute(
-                "SELECT value FROM app_meta WHERE key = ?",
-                ("tracked_pages_seeded",),
-            ).fetchone()
+        with self._db_lock:
+            with self._connect() as connection:
+                seeded_row = connection.execute(
+                    "SELECT value FROM app_meta WHERE key = ?",
+                    ("tracked_pages_seeded",),
+                ).fetchone()
 
-            if seeded_row:
-                return
+                if seeded_row:
+                    return
 
-            existing_count = connection.execute(
-                "SELECT COUNT(1) FROM tracked_pages"
-            ).fetchone()[0]
+                existing_count = connection.execute(
+                    "SELECT COUNT(1) FROM tracked_pages"
+                ).fetchone()[0]
 
-            if normalized_defaults and existing_count == 0:
-                existing_labels: set[str] = set()
-                inserts = []
-                for url in normalized_defaults:
-                    label = _build_label(url, existing_labels)
-                    existing_labels.add(label)
-                    timestamp = datetime.now(UTC).isoformat()
-                    inserts.append((label, url, 1, timestamp))
+                if normalized_defaults and existing_count == 0:
+                    existing_labels: set[str] = set()
+                    inserts = []
+                    for url in normalized_defaults:
+                        label = _build_label(url, existing_labels)
+                        existing_labels.add(label)
+                        timestamp = datetime.now(UTC).isoformat()
+                        inserts.append((label, url, 1, timestamp))
 
-                if inserts:
-                    connection.executemany(
-                        """
-                        INSERT INTO tracked_pages (label, url, enabled, created_at)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        inserts,
-                    )
+                    if inserts:
+                        connection.executemany(
+                            """
+                            INSERT INTO tracked_pages (label, url, enabled, created_at)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            inserts,
+                        )
 
-            connection.execute(
-                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
-                ("tracked_pages_seeded", datetime.now(UTC).isoformat()),
-            )
-            connection.commit()
+                connection.execute(
+                    "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                    ("tracked_pages_seeded", datetime.now(UTC).isoformat()),
+                )
+                connection.commit()
 
     def list_pages(self) -> list[TrackedPage]:
         with self._connect() as connection:
@@ -366,59 +375,62 @@ class TrackedPageRepository:
         if not normalized_url or not normalized_url.startswith(("http://", "https://")):
             raise ValueError("URL must start with http:// or https://")
 
-        with self._connect() as connection:
-            existing_labels = {
-                row[0]
-                for row in connection.execute("SELECT label FROM tracked_pages").fetchall()
-            }
-            final_label = label.strip() if label and label.strip() else _build_label(normalized_url, existing_labels)
-            timestamp = datetime.now(UTC).isoformat()
-            try:
-                cursor = connection.execute(
-                    """
-                    INSERT INTO tracked_pages (label, url, enabled, created_at)
-                    VALUES (?, ?, 1, ?)
-                    """,
-                    (final_label, normalized_url, timestamp),
-                )
-                connection.commit()
-            except sqlite3.IntegrityError as exc:
-                raise ValueError("URL уже добавлен в отслеживание") from exc
+        with self._db_lock:
+            with self._connect() as connection:
+                existing_labels = {
+                    row[0]
+                    for row in connection.execute("SELECT label FROM tracked_pages").fetchall()
+                }
+                final_label = label.strip() if label and label.strip() else _build_label(normalized_url, existing_labels)
+                timestamp = datetime.now(UTC).isoformat()
+                try:
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO tracked_pages (label, url, enabled, created_at)
+                        VALUES (?, ?, 1, ?)
+                        """,
+                        (final_label, normalized_url, timestamp),
+                    )
+                    connection.commit()
+                except sqlite3.IntegrityError as exc:
+                    raise ValueError("URL уже добавлен в отслеживание") from exc
 
         return TrackedPage(id=cursor.lastrowid, label=final_label, url=normalized_url, enabled=True)
 
     def toggle_page(self, page_id: int) -> TrackedPage:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
-                (page_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("Страница с указанным ID не найдена")
+        with self._db_lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
+                    (page_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Страница с указанным ID не найдена")
 
-            new_state = 0 if row[2] else 1
-            connection.execute(
-                "UPDATE tracked_pages SET enabled = ? WHERE id = ?",
-                (new_state, page_id),
-            )
-            connection.commit()
+                new_state = 0 if row[2] else 1
+                connection.execute(
+                    "UPDATE tracked_pages SET enabled = ? WHERE id = ?",
+                    (new_state, page_id),
+                )
+                connection.commit()
 
         return TrackedPage(id=page_id, label=row[0], url=row[1], enabled=bool(new_state))
 
     def remove_page(self, page_id: int) -> TrackedPage:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
-                (page_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("Страница с указанным ID не найдена")
+        with self._db_lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
+                    (page_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Страница с указанным ID не найдена")
 
-            connection.execute(
-                "DELETE FROM tracked_pages WHERE id = ?",
-                (page_id,),
-            )
-            connection.commit()
+                connection.execute(
+                    "DELETE FROM tracked_pages WHERE id = ?",
+                    (page_id,),
+                )
+                connection.commit()
 
         return TrackedPage(id=page_id, label=row[0], url=row[1], enabled=bool(row[2]))
 
@@ -427,19 +439,20 @@ class TrackedPageRepository:
         if not new_label:
             raise ValueError("Название не может быть пустым")
 
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT url, enabled FROM tracked_pages WHERE id = ?",
-                (page_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("Страница с указанным ID не найдена")
+        with self._db_lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT url, enabled FROM tracked_pages WHERE id = ?",
+                    (page_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Страница с указанным ID не найдена")
 
-            connection.execute(
-                "UPDATE tracked_pages SET label = ? WHERE id = ?",
-                (new_label, page_id),
-            )
-            connection.commit()
+                connection.execute(
+                    "UPDATE tracked_pages SET label = ? WHERE id = ?",
+                    (new_label, page_id),
+                )
+                connection.commit()
 
         return TrackedPage(id=page_id, label=new_label, url=row[0], enabled=bool(row[1]))
 
@@ -450,29 +463,32 @@ class TrackedPageRepository:
         if order is not None and order not in valid_orders:
             raise ValueError("Неизвестный тип сортировки")
 
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
-                (page_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("Страница с указанным ID не найдена")
+        with self._db_lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT label, url, enabled FROM tracked_pages WHERE id = ?",
+                    (page_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Страница с указанным ID не найдена")
 
-            new_url = _apply_order_to_url(row[1], order)
+                new_url = _apply_order_to_url(row[1], order)
 
-            if new_url != row[1]:
-                connection.execute(
-                    "UPDATE tracked_pages SET url = ? WHERE id = ?",
-                    (new_url, page_id),
-                )
-                connection.commit()
-            else:
-                new_url = row[1]
+                if new_url != row[1]:
+                    connection.execute(
+                        "UPDATE tracked_pages SET url = ? WHERE id = ?",
+                        (new_url, page_id),
+                    )
+                    connection.commit()
+                else:
+                    new_url = row[1]
 
         return TrackedPage(id=page_id, label=row[0], url=new_url, enabled=bool(row[2]))
 
 
 class AppSettingsRepository:
+    _db_lock = threading.Lock()
+    
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or settings.DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -509,12 +525,13 @@ class AppSettingsRepository:
         return row[0] if row else None
 
     def _set_meta(self, key: str, value: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
-                (key, value),
-            )
-            connection.commit()
+        with self._db_lock:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+                connection.commit()
 
     def _load_extra_admins(self) -> list[int]:
         raw = self._get_meta("admin_chat_ids")

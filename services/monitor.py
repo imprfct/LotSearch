@@ -5,6 +5,7 @@ import asyncio
 import logging
 import re
 from html import escape, unescape
+from typing import TYPE_CHECKING
 
 from aiogram import Bot
 from aiogram.types import InputMediaPhoto
@@ -13,6 +14,9 @@ from aiogram.exceptions import (
     TelegramForbiddenError,
     TelegramRetryAfter,
 )
+
+if TYPE_CHECKING:
+    import aiohttp
 
 from config import settings
 from models import Item
@@ -101,9 +105,9 @@ def _build_notification_caption(
 class Monitor:
     """Monitor for checking new items on websites."""
 
-    def __init__(self, bot: Bot):
+    def __init__(self, bot: Bot, session: "aiohttp.ClientSession | None" = None):
         self.bot = bot
-        self.parser = Parser()
+        self.parser = Parser(session)
         self.repository = ItemRepository()
         self.tracked_pages = TrackedPageRepository()
         self._chat_locks: dict[int, asyncio.Lock] = {}
@@ -175,8 +179,7 @@ class Monitor:
         """Check a specific URL for new items. Returns True if successful."""
         logger.info("Checking URL: %s", url)
 
-        loop = asyncio.get_running_loop()
-        current_items = await loop.run_in_executor(None, self.parser.get_items_from_url, url)
+        current_items = await self.parser.get_items_from_url(url)
 
         if self.parser.last_page_load_failed:
             error_msg = (

@@ -907,7 +907,47 @@ def _compose_latest_preview(
     if saved_at is not None:
         saved_display = saved_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
         parts.append(f"🗓 {saved_display}")
+    
+    # Check if we have description content
+    has_table = bool(item.description_table and len(item.description_table) > 0)
+    has_text = bool(item.description_text and item.description_text.strip())
+    has_any_description = has_table or has_text
+    
+    if has_any_description:
+        parts.append("")
+        # Show header and top separator only if we have text (with or without table)
+        if has_text:
+            parts.append("━━━━━━━━━━━━━━━━━━")
+            parts.append("<b>📋 Описание лота</b>")
+            parts.append("")
+        
+        # Add table if available
+        if has_table and item.description_table:
+            for key, value in item.description_table.items():
+                key_escaped = html.escape(key)
+                value_escaped = html.escape(value)
+                parts.append(f"<b>{key_escaped}:</b> {value_escaped}")
+            parts.append("")
+        
+        # Add description text if available
+        if has_text and item.description_text:
+            desc_escaped = html.escape(item.description_text)
+            # Limit description length to avoid message being too long
+            max_desc_length = 300
+            was_truncated = len(desc_escaped) > max_desc_length
+            if was_truncated:
+                desc_escaped = desc_escaped[:max_desc_length].rstrip() + "..."
+            
+            parts.append(f"<i>{desc_escaped}</i>")
+            
+            if was_truncated:
+                parts.append("")
+                parts.append("💬 <i>Описание обрезано. Полный текст на странице лота.</i>")
+        
+        # Always add bottom separator if we have any description
+        parts.append("━━━━━━━━━━━━━━━━━━")
 
+    parts.append("")
     parts.append(f"🔗 <a href=\"{html.escape(item.url)}\">Открыть лот</a>")
 
     text = "\n".join(parts)
@@ -2019,7 +2059,7 @@ async def cmd_resend_missed_coins(message: Message) -> None:
     for url in urls:
         try:
             # Fetch item details (forced resend - skip database check)
-            html = parser.get_page_content(url)
+            html = await parser.get_page_content(url)
             if not html:
                 logger.warning("Failed to fetch %s", url)
                 error_count += 1
@@ -2095,14 +2135,58 @@ def _build_resend_caption(item: Item) -> str:
     price_value = html.escape(raw_price) if has_price else "Цена не указана"
     price_line = f"💰 <b>{price_value}</b>" if has_price else "💰 <i>Цена не указана</i>"
     
-    return "\n".join([
+    lines = [
         "🔄 <b>Пропущенная монета</b>",
         f"<b>{title}</b>",
         "",
         price_line,
         "",
-        f"🌐 <a href=\"{url}\">Перейти к лоту</a>",
-    ])
+    ]
+    
+    # Check if we have description content
+    has_table = bool(item.description_table and len(item.description_table) > 0)
+    has_text = bool(item.description_text and item.description_text.strip())
+    has_any_description = has_table or has_text
+    
+    # Only show description section if we have table AND text, or just text
+    # If only table - show it without header and top separator
+    if has_any_description:
+        # Show header and top separator only if we have text (with or without table)
+        if has_text:
+            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append("<b>📋 Описание лота</b>")
+            lines.append("")
+        
+        # Add table if available
+        if has_table and item.description_table:
+            for key, value in item.description_table.items():
+                key_escaped = html.escape(key)
+                value_escaped = html.escape(value)
+                lines.append(f"<b>{key_escaped}:</b> {value_escaped}")
+            lines.append("")
+        
+        # Add description text if available
+        if has_text and item.description_text:
+            desc_escaped = html.escape(item.description_text)
+            # Limit description length to avoid message being too long
+            max_desc_length = 400
+            was_truncated = len(desc_escaped) > max_desc_length
+            if was_truncated:
+                desc_escaped = desc_escaped[:max_desc_length].rstrip() + "..."
+            
+            lines.append(f"<i>{desc_escaped}</i>")
+            
+            if was_truncated:
+                lines.append("")
+                lines.append("💬 <i>Описание обрезано. Полный текст на странице лота.</i>")
+        
+        # Always add bottom separator if we have any description
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+    
+    lines.append(f"🌐 <a href=\"{url}\">Перейти к лоту</a>")
+    
+    return "\n".join(lines)
 
 
 

@@ -4,6 +4,7 @@ import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -63,40 +64,56 @@ def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> N
 async def main() -> None:
     settings.validate()
 
-    bot = Bot(
-        token=settings.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    # Create shared aiohttp session
+    timeout = aiohttp.ClientTimeout(total=settings.REQUEST_TIMEOUT)
+    connector = aiohttp.TCPConnector(limit_per_host=5, limit=20)
+    session = aiohttp.ClientSession(
+        headers=settings.HEADERS,
+        timeout=timeout,
+        connector=connector,
     )
-    dispatcher = Dispatcher()
-    dispatcher.include_router(router)
 
-    loop = asyncio.get_running_loop()
-    loop.set_exception_handler(_loop_exception_handler)
+    try:
+        bot = Bot(
+            token=settings.BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        dispatcher = Dispatcher()
+        dispatcher.include_router(router)
 
-    alert_handler = AdminAlertHandler(bot, settings.ADMIN_CHAT_IDS, loop)
-    logging.getLogger().addHandler(alert_handler)
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(_loop_exception_handler)
 
-    monitor = Monitor(bot)
+        alert_handler = AdminAlertHandler(bot, settings.ADMIN_CHAT_IDS, loop)
+        logging.getLogger().addHandler(alert_handler)
 
-    scheduler = AsyncIOScheduler()
-    monitor_job = scheduler.add_job(
-        monitor.check_new_items,
-        "interval",
-        minutes=settings.CHECK_INTERVAL_MINUTES,
-        coalesce=True,
-    )
-    configure_scheduler(scheduler, monitor_job)
-    scheduler.start()
+        monitor = Monitor(bot, session)
 
-    logger.info(
-        "Bot started. Monitoring every %s minutes for %s URLs",
-        settings.CHECK_INTERVAL_MINUTES,
-        len(settings.MONITOR_URLS),
-    )
-    logger.info("Monitoring URLs: %s", settings.MONITOR_URLS)
+        scheduler = AsyncIOScheduler()
+        monitor_job = scheduler.add_job(
+            monitor.check_new_items,
+            "interval",
+            minutes=settings.CHECK_INTERVAL_MINUTES,
+            coalesce=True,
+        )
+        configure_scheduler(scheduler, monitor_job)
+        scheduler.start()
 
-    await monitor.check_new_items()
-    await dispatcher.start_polling(bot)
+        logger.info(
+            "Bot started. Monitoring every %s minutes for %s URLs",
+            settings.CHECK_INTERVAL_MINUTES,
+            len(settings.MONITOR_URLS),
+        )
+        logger.info("Monitoring URLs: %s", settings.MONITOR_URLS)
+
+        # Запускаем первую проверку в фоне, чтобы не блокировать бота
+        asyncio.create_task(monitor.check_new_items())
+        
+        await dispatcher.start_polling(bot)
+    finally:
+        # Закрываем session при остановке
+        await session.close()
+        logger.info("HTTP session closed")
 
 
 if __name__ == "__main__":
